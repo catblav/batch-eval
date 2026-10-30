@@ -39,9 +39,12 @@ Phase 5 · 交付
 - [x] 2026-10-30 NSIS 安装包构建成功（批量评测台_0.1.0_x64-setup.exe，2.58 MiB）
 - [x] 2026-10-30 macOS 交付链路：git 仓库初始化 + .gitignore + GitHub Actions universal dmg 构建配置
 
+- [x] 2026-10-30 推送到 github.com/catblav/batch-eval（公开仓库），打 v0.1.0 标签触发 Actions
+- [x] 2026-10-30 macOS universal dmg 构建成功，耗时 8 分钟，产物 6.3 MB（run #41000104711）
+
 ## 待处理
 
-- [ ] macOS 包：推仓库到 GitHub 后手动触发 `Build macOS` workflow，下载 artifact（未签名，首次打开需右键→打开或 `xattr -cr`）
+- [ ] macOS 包真机验收：在 Mac 上安装 dmg，确认窗口、文件对话框、数据集解析、导出写盘路径均正常
 
 ## 阶段检查点
 
