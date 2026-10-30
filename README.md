@@ -18,9 +18,11 @@ Windows 和 macOS 都能用。
 
 ## 安装
 
+从 [Releases](https://github.com/catblav/batch-eval/releases/latest) 下载对应平台的安装包。
+
 ### Windows
 
-下载 `批量评测台_0.1.0_x64-setup.exe` 运行安装，也可以直接用免安装的 `batch-eval.exe`。
+下载 `BatchEval_0.1.0_x64-setup.exe` 运行安装。
 
 ### macOS
 
