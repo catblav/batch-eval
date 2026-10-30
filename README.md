@@ -6,17 +6,17 @@
 
 双击 `src-tauri\target\release\batch-eval.exe`，免安装。
 
-要生成安装包（网络通畅时）：
+要生成安装包（网络通畅时），在项目根目录执行：
 
 ```bash
-cd D:\py\现工作区\批量评测
 npx tauri build
 ```
 
 ## 开发模式
 
+在项目根目录执行：
+
 ```bash
-cd D:\py\现工作区\批量评测
 npm install
 npm run tauri dev
 ```
