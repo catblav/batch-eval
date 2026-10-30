@@ -45,6 +45,22 @@ const server = http.createServer(async (req, res) => {
 
   const messages = payload.messages || [];
   const lastUser = messages.filter((m) => m.role === "user").map((m) => m.content).join("\n");
+  const sysMsg = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n");
+
+  // 回显模式：把收到的 system / user 原样返回，用来验证变量替换与链路传递
+  if (process.env.MOCK_ECHO === "1") {
+    const echo = `[SYSTEM]\n${sysMsg}\n[/SYSTEM]\n[USER]\n${lastUser}\n[/USER]`;
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(
+      JSON.stringify({
+        id: "echo",
+        object: "chat.completion",
+        choices: [{ index: 0, message: { role: "assistant", content: echo }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      })
+    );
+    return;
+  }
 
   const isJudge = lastUser.includes("OUTPUT_START") || lastUser.includes("评测");
 

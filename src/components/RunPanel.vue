@@ -8,6 +8,7 @@ import {
   toast,
   statusLabelOf,
   ensureUserTemplate,
+  templateVarCheck,
   resetRunResults,
   mergeMissingResults,
   startRunSession,
@@ -84,6 +85,16 @@ async function start(mode = "new", onlyIndices = null) {
   if (ready.value.length) {
     err.value = "还有没填好的地方：" + ready.value.join("、");
     return;
+  }
+  // 模板引用了数据集里不存在的列时，运行会把 {{xxx}} 原样发给模型，先确认一次
+  const unknown = templateVarCheck.value.unknown;
+  if (unknown.length) {
+    const ok = await ask(
+      `提示词里的 ${unknown.map((v) => `{{${v}}}`).join("、")} 在数据集里没有对应列，` +
+        `运行时会把占位符原样发给模型。确定继续吗？`,
+      { title: "有未匹配的变量", kind: "warning", okLabel: "继续", cancelLabel: "返回修改" }
+    );
+    if (!ok) return;
   }
 
   let indices = onlyIndices;
