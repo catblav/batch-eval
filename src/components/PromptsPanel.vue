@@ -1,6 +1,6 @@
 <script setup>
 import { computed, ref } from "vue";
-import { state, ensureUserTemplate, toast } from "../store";
+import { state, ensureUserTemplate, syncTemplateVars, templateVarCheck, toast } from "../store";
 import { invoke } from "@tauri-apps/api/core";
 import { save, open } from "@tauri-apps/plugin-dialog";
 
@@ -81,6 +81,11 @@ function fillTemplate() {
   ensureUserTemplate();
   toast("已按所选列生成用户消息模板", "ok");
 }
+
+function syncVars() {
+  const n = syncTemplateVars();
+  if (n) toast(`已补入 ${n} 个未引用的列`, "ok");
+}
 </script>
 
 <template>
@@ -107,10 +112,33 @@ function fillTemplate() {
       </div>
       <textarea v-model="state.prompts.userTemplate" rows="6" class="field-mono w-full"
         :placeholder="templateExample" />
+
+      <div v-if="state.selectedColumns.length && !templateVarCheck.ok"
+        class="mt-2 rounded border border-warn/40 bg-warn/10 p-2 text-[12px] space-y-1">
+        <div v-if="templateVarCheck.missing.length" class="flex items-start gap-2">
+          <span class="text-warn shrink-0">未引用的列：</span>
+          <span class="flex-1 text-ink-300">
+            <code v-for="c in templateVarCheck.missing" :key="c" class="font-mono mr-1">{{ c }}</code>
+            <span class="text-ink-400">这些列的数据不会进入请求</span>
+          </span>
+          <button class="btn-ghost text-[12px] shrink-0" @click="syncVars">补入模板</button>
+        </div>
+        <div v-if="templateVarCheck.unknown.length" class="flex items-start gap-2">
+          <span class="text-warn shrink-0">数据集里没有：</span>
+          <span class="flex-1 text-ink-300">
+            <code v-for="v in templateVarCheck.unknown" :key="v" class="font-mono mr-1">&#123;&#123;{{ v }}&#125;&#125;</code>
+            <span class="text-ink-400">运行时会把占位符原样发给模型</span>
+          </span>
+        </div>
+      </div>
+
       <div v-if="state.selectedColumns.length" class="flex flex-wrap gap-1 mt-2">
         <span class="hint mr-1">可用变量：</span>
         <code v-for="c in state.selectedColumns" :key="c"
-          class="chip border-ink-700 text-ink-300 bg-ink-850 font-mono">{{ wrapVar(c) }}</code>
+          class="chip font-mono"
+          :class="templateVarCheck.missing.includes(c)
+            ? 'border-warn/40 text-warn bg-warn/10'
+            : 'border-ink-700 text-ink-300 bg-ink-850'">{{ wrapVar(c) }}</code>
       </div>
     </div>
 

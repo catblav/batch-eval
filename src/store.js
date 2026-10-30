@@ -529,6 +529,45 @@ export function ensureUserTemplate() {
   }
 }
 
+/// 裁判提示词的保留变量，不属于数据列
+const RESERVED_VARS = new Set(["input", "output"]);
+
+/// 取出一段模板里引用的所有 {{变量}}，兼容 {{ 变量 }} 的空格写法
+export function referencedVars(text) {
+  const out = new Set();
+  for (const m of String(text || "").matchAll(/\{\{\s*([^{}]+?)\s*\}\}/g)) {
+    out.add(m[1]);
+  }
+  return out;
+}
+
+/// 模板与数据集列的一致性：
+/// - missing：选中的列没有在主体提示词或用户消息里被引用，这些列的数据不会进入请求
+/// - unknown：模板引用了数据集里不存在的列，运行时会把 {{xxx}} 字面量发给模型
+export const templateVarCheck = computed(() => {
+  const cols = state.selectedColumns;
+  const used = new Set([
+    ...referencedVars(state.prompts.systemPrompt),
+    ...referencedVars(state.prompts.userTemplate),
+  ]);
+  const colSet = new Set(state.dataset.columns || []);
+  const missing = cols.filter((c) => !used.has(c));
+  const unknown = [...used].filter(
+    (v) => !RESERVED_VARS.has(v) && !colSet.has(v)
+  );
+  return { missing, unknown, ok: !missing.length && !unknown.length };
+});
+
+/// 把未被引用的列追加到用户消息模板末尾，不改动已有内容
+export function syncTemplateVars() {
+  const { missing } = templateVarCheck.value;
+  if (!missing.length) return 0;
+  const tail = missing.map((c) => `{{${c}}}`).join("\n\n");
+  const cur = state.prompts.userTemplate.replace(/\s+$/, "");
+  state.prompts.userTemplate = cur ? `${cur}\n\n${tail}` : tail;
+  return missing.length;
+}
+
 export function statusLabelOf(row) {
   if (row && Object.prototype.hasOwnProperty.call(row, "数据组状态")) {
     return String(row["数据组状态"] || "未分组");

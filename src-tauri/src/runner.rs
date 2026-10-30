@@ -233,6 +233,9 @@ async fn run_one(
         return None;
     }
     let user_msg = render(&cfg.user_template, row, "", "");
+    // 系统提示词与用户消息同样按行渲染：两者都可能引用数据集列，
+    // 不渲染会把 {{列名}} 字面量发给模型。
+    let system_prompt = render(&cfg.system_prompt, row, "", "");
     let mut res = RowResult {
         index: idx,
         input: user_msg.clone(),
@@ -255,7 +258,7 @@ async fn run_one(
     let target = match call_with_retry(
         target_client,
         &cfg.target,
-        &cfg.system_prompt,
+        &system_prompt,
         &user_msg,
         cfg.max_retries,
         flag,
@@ -285,7 +288,7 @@ async fn run_one(
         return None;
     }
 
-    let input_for_judge = judge_input_text(&cfg.system_prompt, &user_msg);
+    let input_for_judge = judge_input_text(&system_prompt, &user_msg);
     let judge_input = render(&cfg.eval_prompt, row, &input_for_judge, &res.output);
     match call_with_retry(
         judge_client,
@@ -419,6 +422,30 @@ impl Sink {
             self.emit_batch();
         }
     }
+}
+
+/// 测试入口：跑单行，不经过 Tauri 事件与并发调度。
+/// 让集成测试能验证「数据列 → 渲染 → 被测模型 / 裁判」这条链路。
+#[cfg(test)]
+pub(crate) async fn run_one_for_test(
+    cfg: &RunConfig,
+    row: &Map<String, Value>,
+) -> Option<RowResult> {
+    let target_client = crate::api::build_client(&cfg.target).ok()?;
+    let judge_client = crate::api::build_client(&cfg.judge).ok()?;
+    let flag = AtomicBool::new(false);
+    let gate = AtomicU64::new(0);
+    run_one(
+        cfg,
+        0,
+        row,
+        &target_client,
+        &judge_client,
+        "测试",
+        &flag,
+        &gate,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -621,6 +648,19 @@ mod tests {
     fn unknown_placeholder_stays_untouched() {
         let r = row(&[("a", "1")]);
         assert_eq!(render("{{missing}}", &r, "", ""), "{{missing}}");
+    }
+
+    /// 系统提示词里的 {{列名}} 必须按行渲染。
+    /// 回归用：曾经只渲染 user_template，系统提示词被原样下发，
+    /// 导致提示词里引用数据集列的写法全部失效。
+    #[test]
+    fn system_prompt_renders_row_columns() {
+        let r = row(&[("mode", "strict"), ("rules", "- 规则甲\n- 规则乙")]);
+        let out = render("模式：{{mode}}\n<<<RULES>>>\n{{rules}}", &r, "", "");
+        assert!(out.contains("strict"));
+        assert!(out.contains("- 规则甲"));
+        assert!(!out.contains("{{mode}}"));
+        assert!(!out.contains("{{rules}}"));
     }
 
     #[test]

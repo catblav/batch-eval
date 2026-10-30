@@ -89,6 +89,78 @@ mod dataset_tests {
     }
 }
 
+/// 变量注入与链路传递的端到端验证。需先用回显模式启动 mock：
+///   MOCK_ECHO=1 node tests/mock-api.mjs
+///   cargo test --lib var_injection -- --ignored --nocapture
+///
+/// 回显 mock 把收到的 system / user 原样返回，因此被测模型的"输出"就是它实际收到的请求内容，
+/// 可以直接断言：主体提示词与用户消息里的 {{列名}} 都已替换，且裁判拿到了渲染后的提示词与被测输出。
+#[cfg(test)]
+mod var_injection {
+    use crate::api::ApiProfile;
+    use crate::runner::RunConfig;
+
+    fn profile() -> ApiProfile {
+        ApiProfile {
+            protocol: "openai".into(),
+            base_url: "http://127.0.0.1:18999/v1".into(),
+            api_key: "t".into(),
+            model: "mock-model".into(),
+            temperature: Some(0.0),
+            top_p: None,
+            max_tokens: Some(2048),
+            context_window: Some(32768),
+            timeout_secs: Some(20),
+            extra_body: None,
+            extra_headers: None,
+        }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn vars_reach_target_and_judge() {
+        let cfg = RunConfig {
+            // 主体提示词与用户消息都引用数据列
+            system_prompt: "模式：{{mode}}\n<<<RULES>>>\n{{rules}}\n<<<END>>>".into(),
+            user_template: "{{content}}".into(),
+            eval_prompt: "【给裁判的输入】\n{{input}}\n【被测输出】\n{{output}}".into(),
+            target: profile(),
+            judge: profile(),
+            concurrency: 1,
+            max_retries: 0,
+            mode: "newRun".into(),
+            retry_indices: None,
+            run_id: "t-var".into(),
+        };
+        let mut row = serde_json::Map::new();
+        row.insert("mode".into(), serde_json::json!("strict"));
+        row.insert("rules".into(), serde_json::json!("- 规则甲\n- 规则乙"));
+        row.insert("content".into(), serde_json::json!("原始经历文本"));
+
+        let res = crate::runner::run_one_for_test(&cfg, &row).await.expect("应有结果");
+
+        // 1) 被测模型收到的 system：变量已替换，无残留占位符
+        let out = &res.output;
+        assert!(out.contains("模式：strict"), "system 未注入 mode：{out}");
+        assert!(out.contains("- 规则甲"), "system 未注入 rules：{out}");
+        assert!(!out.contains("{{mode}}"), "system 残留占位符：{out}");
+        assert!(!out.contains("{{rules}}"), "system 残留占位符：{out}");
+
+        // 2) 被测模型收到的 user：变量已替换
+        assert!(out.contains("原始经历文本"), "user 未注入 content：{out}");
+        assert!(!out.contains("{{content}}"), "user 残留占位符：{out}");
+
+        // 3) 裁判收到的内容：含渲染后的主体提示词 + 用户消息 + 被测输出
+        let j = &res.judge_raw;
+        assert!(j.contains("【被评估模型的提示词】"), "裁判缺提示词段：{j}");
+        assert!(j.contains("模式：strict"), "裁判看到的提示词未渲染：{j}");
+        assert!(j.contains("- 规则甲"), "裁判看到的提示词未渲染：{j}");
+        assert!(j.contains("原始经历文本"), "裁判缺用户消息：{j}");
+        assert!(j.contains("[SYSTEM]"), "裁判缺被测输出：{j}");
+        assert!(!j.contains("{{input}}") && !j.contains("{{output}}"), "裁判模板未渲染：{j}");
+    }
+}
+
 /// 批量链路：N 条数据 → 被测模型 → 评测模型 → 聚合分类。需先启动 mock 服务。
 #[cfg(test)]
 mod batch_flow {
