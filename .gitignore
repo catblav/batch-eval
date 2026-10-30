@@ -1,0 +1,23 @@
+# 依赖
+node_modules/
+
+# 构建产物
+dist/
+src-tauri/target/
+src-tauri/gen/schemas/
+src-tauri/gen/apple/
+src-tauri/gen/android/
+
+# 安装包与快捷方式
+*.exe
+*.msi
+*.dmg
+*.app
+*.lnk
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
