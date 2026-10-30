@@ -30,7 +30,7 @@ mod integration {
         let client = api::build_client(&p).unwrap();
 
         // 1. 被测模型：普通输入应得到完整回答
-        let out = api::chat(&client, &p, "你是助手", "帮我改写简历")
+        let out = api::chat(&client, &p, "你是助手", "帮我改写一段文本")
             .await
             .expect("被测模型调用失败");
         assert!(out.text.contains("完整回答"));
