@@ -1,0 +1,154 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---------- 主题变量 ---------- */
+:root {
+  /* 亮色：暖灰底，不用纯白，长时间看不刺眼 */
+  --ink-950: 245 244 241; /* 页面底色 */
+  --ink-900: 252 251 249; /* 卡片 */
+  --ink-850: 241 240 236; /* 次级面 */
+  --ink-800: 233 231 226; /* hover */
+  --ink-700: 219 216 209; /* 边框 */
+  --ink-600: 198 194 186;
+  --ink-500: 146 141 132; /* 弱文本 */
+  --ink-400: 108 103 95;
+  --ink-300: 74 70 64;
+  --ink-200: 42 39 35; /* 主文本 */
+  --pass: 47 140 96;
+  --fail: 190 72 66;
+  --warn: 184 133 42;
+  --accent: 62 106 200;
+  --shadow: 0 1px 2px rgba(30, 28, 24, 0.06), 0 4px 12px rgba(30, 28, 24, 0.04);
+  --sel: 62 106 200;
+}
+
+.dark {
+  --ink-950: 12 14 17;
+  --ink-900: 20 23 28;
+  --ink-850: 26 30 36;
+  --ink-800: 34 39 47;
+  --ink-700: 46 52 62;
+  --ink-600: 62 70 82;
+  --ink-500: 96 105 118;
+  --ink-400: 138 147 160;
+  --ink-300: 184 193 205;
+  --ink-200: 222 228 236;
+  --pass: 88 190 138;
+  --fail: 226 110 104;
+  --warn: 226 176 88;
+  --accent: 116 155 240;
+  --shadow: none;
+  --sel: 116 155 240;
+}
+
+@layer base {
+  html,
+  body,
+  #app {
+    height: 100%;
+  }
+  /* WebView2 在 Windows 上对触控板滚动做了回弹（overscroll bounce），
+     内容本来放得下也会整页跟着手指晃。根节点关掉，滚动只发生在真正的滚动容器里。 */
+  html,
+  body {
+    overscroll-behavior: none;
+  }
+  #app {
+    overflow: hidden;
+  }
+  body {
+    @apply bg-ink-950 text-ink-200 antialiased;
+    font-size: 14px;
+    color-scheme: light;
+  }
+  .dark body {
+    color-scheme: dark;
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-ink-700 rounded;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-ink-600;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  input,
+  textarea,
+  select {
+    @apply outline-none;
+  }
+  ::selection {
+    background: rgb(var(--sel) / 0.22);
+  }
+  input[type="checkbox"] {
+    accent-color: rgb(var(--accent));
+  }
+}
+
+@layer components {
+  .field {
+    @apply w-full bg-ink-900 border border-ink-700 rounded-md px-3 py-2 text-ink-200 text-[13px]
+      placeholder:text-ink-500 focus:border-accent focus:ring-1 focus:ring-accent/30 transition;
+    box-shadow: var(--shadow);
+  }
+  .field-mono {
+    @apply field font-mono text-[12.5px] leading-relaxed;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-[13px]
+      border border-ink-700 bg-ink-850 text-ink-200 hover:bg-ink-800 hover:border-ink-600
+      transition disabled:opacity-40 disabled:cursor-not-allowed select-none;
+  }
+  .btn-primary {
+    @apply btn bg-accent border-accent text-white hover:bg-accent/90 hover:border-accent/90;
+  }
+  .btn-ghost {
+    @apply btn bg-transparent border-transparent text-ink-400 hover:text-ink-200 hover:bg-ink-850;
+  }
+  .btn-danger {
+    @apply btn text-fail border-ink-700 hover:bg-fail/10 hover:border-fail/40;
+  }
+  .card {
+    @apply bg-ink-900 border border-ink-700/80 rounded-lg;
+    box-shadow: var(--shadow);
+  }
+  .label {
+    @apply block text-[12px] text-ink-400 mb-1.5 font-medium;
+  }
+  .hint {
+    @apply text-[11.5px] text-ink-500 leading-relaxed;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] border;
+  }
+  /* 表头内的列筛选下拉：尽量小，不抢列标题的视觉权重 */
+  .col-filter {
+    @apply bg-transparent border border-ink-700 rounded px-1 py-0.5 text-[11px] text-ink-400
+      hover:text-ink-200 hover:border-ink-600 focus:border-accent transition cursor-pointer;
+  }
+  .tab {
+    @apply px-3 py-1.5 rounded-md text-[13px] text-ink-400 hover:text-ink-200 cursor-pointer transition;
+  }
+  .tab-active {
+    @apply bg-ink-900 text-ink-200;
+    box-shadow: var(--shadow);
+  }
+  .panel {
+    @apply bg-ink-850/60 border border-ink-700/60 rounded-md;
+  }
+}
+
+/* 滚动容器滑到边界后不再把滚动链传给外层：
+   否则表格滑到底时，鼠标还停在表格上，整页也跟着动。 */
+.overflow-auto,
+.overflow-scroll,
+.overflow-y-auto,
+.overflow-x-auto {
+  overscroll-behavior: contain;
+}

@@ -1,0 +1,55 @@
+name: Build macOS
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-macos:
+    runs-on: macos-14
+    timeout-minutes: 60
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: 安装 Rust（含双架构 target）
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Rust 编译缓存
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      - name: 构建 universal dmg（未签名）
+        uses: tauri-apps/tauri-action@v0
+        with:
+          args: --target universal-apple-darwin --bundles app,dmg
+
+      - name: 归集产物并转 ASCII 文件名
+        run: |
+          VER=$(jq -r .version src-tauri/tauri.conf.json)
+          mkdir -p artifacts
+          find src-tauri/target/universal-apple-darwin/release/bundle/dmg -name "*.dmg" \
+            -exec cp {} "artifacts/BatchEval_${VER}_macOS_universal.dmg" \;
+          ls -lh artifacts
+
+      - name: 上传 dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: BatchEval-macos-universal
+          path: artifacts/*.dmg
+          if-no-files-found: error
