@@ -77,7 +77,7 @@ function toggleCat(name) {
 <template>
   <div v-if="!s.total" class="card p-10 text-center">
     <p class="text-ink-400 text-[13px]">还没有跑测结果</p>
-    <p class="hint mt-2">先去「运行」页跑一批，这里会出现通过率、分类分布和交叉热力图。</p>
+    <p class="hint mt-2">先去「运行」页跑一批，这里会出现通过率和分类分布。</p>
   </div>
 
   <div v-else class="space-y-4">

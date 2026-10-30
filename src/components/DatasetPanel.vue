@@ -146,7 +146,7 @@ function sample(row, col) {
         <p class="hint mt-2">
           可以从 Excel / CSV / JSON 导入，也可以直接粘贴表格或 JSON 数组。
         </p>
-        <p class="hint mt-1">首列或任意列名为「数据组状态」时，分析页会按它做交叉热力图。</p>
+        <p class="hint mt-1">首列或任意列名为「数据组状态」时，分析页会按它做分组统计。</p>
       </div>
 
       <div v-if="pasteOpen" class="mt-3 space-y-2">
