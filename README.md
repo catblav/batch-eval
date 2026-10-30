@@ -22,11 +22,11 @@ Windows 和 macOS 都能用。
 
 ### Windows
 
-下载 `BatchEval_0.1.0_x64-setup.exe` 运行安装。
+下载 `BatchEval_0.1.1_x64-setup.exe` 运行安装。
 
 ### macOS
 
-下载 `BatchEval_0.1.0_macOS_universal.dmg`，打开后把应用拖进 Applications。包里同时有 Apple Silicon 和 Intel 两种架构。
+下载 `BatchEval_0.1.1_macOS_universal.dmg`，打开后把应用拖进 Applications。包里同时有 Apple Silicon 和 Intel 两种架构。
 
 安装包没有做 Apple 公证，第一次打开要**右键点图标选打开**。如果系统仍然拦截，在终端执行：
 
