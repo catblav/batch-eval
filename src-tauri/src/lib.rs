@@ -1,6 +1,7 @@
 mod api;
 mod dataset;
 mod judge;
+mod report;
 mod run_store;
 mod runner;
 mod storage;
@@ -24,6 +25,7 @@ pub fn run() {
             run_store::clear_run,
             dataset::parse_dataset_file,
             dataset::parse_dataset_text,
+            report::export_excel_report,
             runner::start_run,
             runner::cancel_run,
             runner::test_connection,

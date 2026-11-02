@@ -245,7 +245,7 @@ const statusText = computed(() => {
       <div class="flex items-center gap-3 mt-2 text-[12px] text-ink-400">
         <span>{{ run.done }} / {{ run.total || state.dataset.rows.length }}</span>
         <span v-if="run.results.length">
-          通过 {{ stats.passed }} · 不通过 {{ stats.failed }}
+          通过 {{ stats.passed }} · 不通过 {{ stats.failed }}<span v-if="stats.excluded"> · 未计入 {{ stats.excluded }}</span>
         </span>
         <span class="flex-1" />
         <span v-if="statusText" :class="run.running ? 'text-accent' : run.status === 'failed' ? 'text-fail' : 'text-ink-400'">
@@ -258,7 +258,7 @@ const statusText = computed(() => {
         <button v-if="run.running" class="btn-danger" @click="cancel">取消</button>
         <button class="btn" :disabled="run.running || !canResume" @click="start('resume')">断点续跑</button>
         <button class="btn" :disabled="run.running || !failedCount" @click="start('retry')">
-          重跑失败项（{{ failedCount }}）
+          重跑未通过项（{{ failedCount }}）
         </button>
         <span class="flex-1" />
         <button class="btn-ghost" :disabled="run.running || !run.results.length" @click="clearAll">

@@ -10,6 +10,44 @@ export const UNCLASSIFIED = "未分类（裁判未给 errorType）";
 /// 工具自己的兜底分类，与用户评测提示词定义的分类区分展示
 export const BUILTIN_CATEGORIES = [PARSE_FAIL, TARGET_FAIL, JUDGE_FAIL, UNCLASSIFIED];
 
+/// 调用链路本身没跑通：被测模型/评测模型没调通、或裁判输出解析不了。
+/// 这些不是「模型答错」，不参与通过率，单独列在「未计入通过率」里。
+/// 注意 UNCLASSIFIED 不在其中——那是裁判真的判了不通过，只是没给分类。
+export const EXCLUDED_CATEGORIES = [TARGET_FAIL, JUDGE_FAIL, PARSE_FAIL];
+
+/// 未计入通过率里再细分一个「模型超时」，其余归为调用失败
+export const TIMEOUT_LABEL = "模型超时";
+
+const TIMEOUT_RE = /超时|timeout|timed\s*out|deadline\s*exceeded/i;
+
+function textOf(r) {
+  return [r.targetError, r.details, ...(r.reasons || [])]
+    .filter(Boolean)
+    .join(" ");
+}
+
+/// 该条是否未计入通过率
+export function isExcluded(r) {
+  if (r.targetError) return true;
+  if (r.parseOk === false) return true;
+  return (r.errorTypes || []).some((t) => EXCLUDED_CATEGORIES.includes(t));
+}
+
+/// 分类名本身是否属于「未计入」那一组（明细筛选按分类名走时用）
+export function isExcludedCategory(name) {
+  if (!name) return false;
+  if (EXCLUDED_CATEGORIES.includes(name) || name === TIMEOUT_LABEL) return true;
+  return name.startsWith("模型超时");
+}
+
+/// 未计入的那条落在哪个子类：模型超时 / 评测模型调用失败 / 被测模型调用失败 / 解析失败
+function excludedKindOf(r) {
+  const timeout = TIMEOUT_RE.test(textOf(r));
+  if (r.targetError) return timeout ? TIMEOUT_LABEL : TARGET_FAIL;
+  if ((r.errorTypes || []).includes(JUDGE_FAIL)) return timeout ? TIMEOUT_LABEL : JUDGE_FAIL;
+  return PARSE_FAIL;
+}
+
 function blankProfile(kind) {
   return {
     protocol: "openai",
@@ -392,41 +430,69 @@ export const results = computed(() => state.run.results);
 export const stats = computed(() => {
   const list = state.run.results;
   const total = list.length;
-  // 口径：pass === true 即通过，其余为不通过；不通过的按 errorType 分桶
-  const passed = list.filter((r) => r.pass === true).length;
-  const failed = total - passed;
 
+  // 三桶口径：
+  //   excluded —— 调用链路没跑通，不参与通过率（模型超时 / 调用失败 / 解析失败）
+  //   passed   —— 裁判判通过
+  //   failed   —— 裁判判不通过，按 errorType 分桶
+  let passed = 0;
+  let excluded = 0;
   const counts = {};
+  const exCounts = {};
+
   for (const r of list) {
-    if (r.pass === true) continue;
+    if (isExcluded(r)) {
+      excluded++;
+      const k = excludedKindOf(r);
+      exCounts[k] = (exCounts[k] || 0) + 1;
+      continue;
+    }
+    if (r.pass === true) {
+      passed++;
+      continue;
+    }
     const types = (r.errorTypes || []).filter((t) => t && t.trim());
     // 判了不通过却没给分类，单列一桶，不混进解析失败
     const keys = types.length ? types : [UNCLASSIFIED];
     for (const t of keys) counts[t] = (counts[t] || 0) + 1;
   }
 
-  const byType = Object.entries(counts)
-    .map(([name, count]) => ({
-      name,
-      count,
-      ratio: failed ? count / failed : 0,
-      ratioOfTotal: total ? count / total : 0,
-      builtin: BUILTIN_CATEGORIES.includes(name),
-    }))
-    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  // 有效样本：总数扣掉未计入，通过率只在这个基数上算
+  const valid = total - excluded;
+  const failed = valid - passed;
+
+  const toItems = (src, base, list_) =>
+    Object.entries(src)
+      .map(([name, count]) => ({
+        name,
+        count,
+        ratio: base ? count / base : 0,
+        ratioOfTotal: total ? count / total : 0,
+        builtin: list_ ? list_.includes(name) : false,
+      }))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+
+  const byType = toItems(counts, failed, BUILTIN_CATEGORIES);
+  const excludedTypes = toItems(exCounts, excluded);
 
   return {
     total,
+    valid,
     passed,
     failed,
-    passRate: total ? passed / total : 0,
+    excluded,
+    passRate: valid ? passed / valid : 0,
     byType,
-    categories: byType.map((x) => x.name),
+    excludedTypes,
+    // 明细表的下拉筛选要把「未计入」的子类也列出来
+    categories: [...byType, ...excludedTypes].map((x) => x.name),
   };
 });
 
-/// 一行在分类统计中所归属的桶，与 stats 保持同一口径
+/// 一行在分类统计中所归属的桶，与 stats 保持同一口径。
+/// 未计入的返回其子类名，通过返回空数组。
 export function bucketsOf(r) {
+  if (isExcluded(r)) return [excludedKindOf(r)];
   if (r.pass === true) return [];
   const types = (r.errorTypes || []).filter((t) => t && t.trim());
   return types.length ? types : [UNCLASSIFIED];
@@ -461,8 +527,10 @@ function hayOf(r) {
 export const filteredResults = computed(() => {
   const q = state.view.queryApplied.trim().toLowerCase();
   return state.run.results.filter((r) => {
-    if (state.view.filterStatus === "pass" && r.pass !== true) return false;
-    if (state.view.filterStatus === "fail" && r.pass === true) return false;
+    const ex = isExcluded(r);
+    if (state.view.filterStatus === "pass" && (ex || r.pass !== true)) return false;
+    if (state.view.filterStatus === "fail" && (ex || r.pass === true)) return false;
+    if (state.view.filterStatus === "excluded" && !ex) return false;
     if (state.view.filterGroup && (r.statusLabel || "未分组") !== state.view.filterGroup) {
       return false;
     }

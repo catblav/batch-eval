@@ -1,13 +1,14 @@
 <script setup>
 import { computed, ref } from "vue";
-import { state, stats, filteredResults, pagedResults, pageCount, groupOptions, toast } from "../store";
+import { state, stats, filteredResults, pagedResults, pageCount, groupOptions, toast, isExcluded, isExcludedCategory } from "../store";
 import BarChart from "./BarChart.vue";
 import Donut from "./Donut.vue";
 import DetailDrawer from "./DetailDrawer.vue";
-import { exportCsv, exportJson } from "../utils/exporters";
+import { exportCsv, exportJson, exportFullReport } from "../utils/exporters";
 
 const s = stats;
 const drawerIndex = ref(-1);
+const exporting = ref(false);
 
 const hasFilter = computed(
   () =>
@@ -58,11 +59,93 @@ function onExport(kind) {
   else exportJson(state.run.results, state.dataset.columns);
 }
 
+/// 完整报告：图上看到的一切 + 全部明细，落成一个多 sheet 的 xlsx
+async function onExportReport() {
+  if (!state.run.results.length) {
+    toast("还没有结果可导出", "info");
+    return;
+  }
+  if (exporting.value) return;
+  exporting.value = true;
+  try {
+    await exportFullReport(buildReportPayload());
+  } finally {
+    exporting.value = false;
+  }
+}
+
+function fmtDuration(ms) {
+  if (!ms) return "—";
+  const sec = Math.round(ms / 1000);
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const secLeft = sec % 60;
+  if (h) return `${h} 小时 ${m} 分`;
+  if (m) return `${m} 分 ${secLeft} 秒`;
+  return `${secLeft} 秒`;
+}
+
 const avgLatency = computed(() => {
   const list = state.run.results.filter((r) => r.targetLatencyMs);
   if (!list.length) return 0;
   return Math.round(list.reduce((a, r) => a + r.targetLatencyMs, 0) / list.length);
 });
+
+/// 报告只带渲染需要的东西，不把整个 reactive 对象丢给 Rust
+function buildReportPayload() {
+  const v = s.value;
+  const rows = state.run.results.map((r) => {
+    const ex = isExcluded(r);
+    return {
+      index: r.index + 1,
+      group: r.statusLabel || "未分组",
+      verdict: ex ? "未计入" : r.pass === true ? "通过" : "不通过",
+      excluded: ex,
+      categories: (r.errorTypes || []).join(" / "),
+      reasons: (r.reasons || []).join("；"),
+      details: r.details || "",
+      output: r.output || "",
+      input: r.input || "",
+      targetError: r.targetError || "",
+      targetLatencyMs: r.targetLatencyMs,
+      judgeLatencyMs: r.judgeLatencyMs,
+      promptTokens: r.promptTokens ?? null,
+      completionTokens: r.completionTokens ?? null,
+      judgeRaw: r.judgeRaw || "",
+    };
+  });
+
+  // 模型参数：只取展示用的字段，apiKey 和接口地址不进报告
+  const profileOf = (p) => ({
+    protocol: p.protocol || "",
+    model: p.model || "",
+    contextWindow: Number(p.contextWindow) || 0,
+    maxTokens: Number(p.maxTokens) || 0,
+    temperature: Number(p.temperature) || 0,
+    topP: Number(p.topP) || 0,
+    timeoutSecs: Number(p.timeoutSecs) || 0,
+    extraBody: p.extraBody || "",
+    extraHeaders: p.extraHeaders || "",
+  });
+
+  return {
+    generatedAt: new Date().toISOString(),
+    datasetRows: state.dataset.rows.length,
+    targetProfile: profileOf(state.settings.target),
+    judgeProfile: profileOf(state.settings.judge),
+    summary: {
+      total: v.total,
+      valid: v.valid,
+      passed: v.passed,
+      failed: v.failed,
+      excluded: v.excluded,
+      passRate: v.passRate,
+      avgTargetLatencyMs: avgLatency.value,
+    },
+    categories: s.value.byType.map((t) => ({ name: t.name, count: t.count, ratio: t.ratio })),
+    rows,
+  };
+}
 
 // 评测提示词定义的分类 / 工具兜底分类，分开展示
 const promptCats = computed(() => stats.value.byType.filter((t) => !t.builtin));
@@ -70,7 +153,9 @@ const builtinCats = computed(() => stats.value.byType.filter((t) => t.builtin));
 
 function toggleCat(name) {
   state.view.filterCategory = state.view.filterCategory === name ? "" : name;
-  if (state.view.filterCategory) state.view.filterStatus = "fail";
+  if (!state.view.filterCategory) return;
+  // 未计入与不通过是互斥的两组，筛选要跟着分类走，否则点了什么都筛不出来
+  state.view.filterStatus = isExcludedCategory(name) ? "excluded" : "fail";
 }
 </script>
 
@@ -82,26 +167,36 @@ function toggleCat(name) {
 
   <div v-else class="space-y-4">
     <div class="grid grid-cols-4 gap-4">
-      <div class="card p-4 col-span-2"><Donut :total="s.total" :passed="s.passed" :failed="s.failed" /></div>
+      <div class="card p-4 col-span-2 flex items-center justify-between gap-3">
+        <Donut :total="s.total" :passed="s.passed" :failed="s.failed" :excluded="s.excluded" />
+        <button class="btn shrink-0" :disabled="exporting" @click="onExportReport" title="通过率、分类分布、未计入明细、分组汇总与全部明细，导成一个多 sheet 的 Excel">
+          {{ exporting ? "生成中…" : "导出完整报告" }}
+        </button>
+      </div>
       <div class="card p-4 flex flex-col justify-center gap-2">
         <button class="text-left group" @click="state.view.filterStatus = 'pass'; state.view.filterCategory = ''">
           <div class="hint">通过（pass = true）</div>
           <div class="text-[26px] font-semibold tabular-nums text-pass leading-none mt-0.5 group-hover:underline">
-            {{ s.passed }}<span class="text-[13px] text-ink-500 ml-1">/ {{ s.total }}</span>
+            {{ s.passed }}<span class="text-[13px] text-ink-500 ml-1">/ {{ s.valid }}</span>
           </div>
         </button>
         <button class="text-left group" @click="state.view.filterStatus = 'fail'; state.view.filterCategory = ''">
           <div class="hint">不通过（pass = false）</div>
           <div class="text-[26px] font-semibold tabular-nums text-fail leading-none mt-0.5 group-hover:underline">
-            {{ s.failed }}<span class="text-[13px] text-ink-500 ml-1">/ {{ s.total }}</span>
+            {{ s.failed }}<span class="text-[13px] text-ink-500 ml-1">/ {{ s.valid }}</span>
           </div>
         </button>
       </div>
       <div class="card p-4">
-        <div class="hint">错误分类数</div>
-        <div class="text-[26px] font-semibold tabular-nums text-ink-200 mt-1">{{ s.byType.length }}</div>
-        <div class="hint mt-1 truncate" :title="s.byType[0]?.name">
-          最集中在「{{ s.byType[0]?.name || "—" }}」
+        <button class="text-left group w-full" @click="state.view.filterStatus = 'excluded'; state.view.filterCategory = ''"
+          title="调用失败 / 超时 / 解析失败，不参与通过率">
+          <div class="hint">未计入通过率</div>
+          <div class="text-[26px] font-semibold tabular-nums text-warn leading-none mt-0.5 group-hover:underline">
+            {{ s.excluded }}<span class="text-[13px] text-ink-500 ml-1">/ {{ s.total }}</span>
+          </div>
+        </button>
+        <div class="hint mt-1 truncate" :title="s.excludedTypes[0]?.name">
+          主要：{{ s.excludedTypes[0]?.name || "—" }}
         </div>
         <div class="hint mt-2">平均响应 {{ (avgLatency / 1000).toFixed(1) }}s</div>
       </div>
@@ -119,7 +214,7 @@ function toggleCat(name) {
       </div>
 
       <div v-if="builtinCats.length" :class="promptCats.length ? 'mt-4 pt-3 border-t border-ink-700/60' : ''">
-        <div class="hint mb-1.5">工具兜底分类（调用或解析异常，不是模型答错）</div>
+        <div class="hint mb-1.5">工具兜底分类（裁判判了不通过却没给分类，不是调用异常）</div>
         <BarChart :items="builtinCats" :total="s.failed" color="rgb(var(--warn))" />
       </div>
 
@@ -138,6 +233,21 @@ function toggleCat(name) {
       </div>
     </div>
 
+    <div v-if="s.excluded" class="card p-4 border-warn/30">
+      <div class="flex items-center gap-2 mb-3">
+        <span class="text-[13px] font-semibold text-warn/90">未计入通过率 · {{ s.excluded }} 条</span>
+        <span class="hint">调用失败、超时、解析失败，不是模型答错，不参与通过率计算</span>
+      </div>
+      <BarChart :items="s.excludedTypes" :total="s.excluded" color="rgb(var(--warn))" />
+      <div class="flex flex-wrap gap-1 mt-3">
+        <button v-for="t in s.excludedTypes" :key="t.name" class="chip border-warn/40 text-warn/90 hover:text-warn"
+          :class="state.view.filterCategory === t.name ? 'bg-warn/10' : ''"
+          @click="toggleCat(t.name)">
+          {{ t.name }} <span class="tabular-nums opacity-70">{{ t.count }}</span>
+        </button>
+      </div>
+    </div>
+
     <div class="card overflow-hidden">
       <div class="flex items-center gap-2 px-4 py-2.5 border-b border-ink-700/60 flex-wrap">
         <span class="text-[13px] font-semibold">明细</span>
@@ -145,8 +255,9 @@ function toggleCat(name) {
         <span class="flex-1" />
         <input v-model="state.view.query" class="field w-52 text-[12px]" placeholder="搜索输入 / 输出 / 原因" />
         <button v-if="hasFilter" class="btn-ghost text-[12px]" @click="reset">重置筛选</button>
-        <button class="btn text-[12px]" @click="onExport('csv')">导出 Excel</button>
-        <button class="btn text-[12px]" @click="onExport('json')">导出 JSON</button>
+        <button class="btn-ghost text-[12px]" @click="onExport('csv')" title="只导明细表，CSV 格式">导出明细 CSV</button>
+        <button class="btn-ghost text-[12px]" @click="onExport('json')" title="原始结果逐条导出">导出 JSON</button>
+        <button class="btn text-[12px]" :disabled="exporting" @click="onExportReport">导出完整报告</button>
       </div>
 
       <div class="overflow-auto max-h-[520px]">
@@ -161,6 +272,7 @@ function toggleCat(name) {
                     <option value="all">全部</option>
                     <option value="pass">通过</option>
                     <option value="fail">不通过</option>
+                    <option value="excluded">未计入</option>
                   </select>
                 </div>
               </th>
@@ -194,9 +306,9 @@ function toggleCat(name) {
               class="border-t border-ink-800 hover:bg-ink-850/70 cursor-pointer" @click="open(r.index)">
               <td class="px-3 py-1.5 text-ink-500 align-top">{{ r.index + 1 }}</td>
               <td class="px-3 py-1.5 align-top">
-                <span class="chip" :class="r.pass === true ? 'border-pass/40 text-pass bg-pass/10' : 'border-fail/40 text-fail bg-fail/10'">
-                  {{ r.pass === true ? "通过" : "不通过" }}
-                </span>
+                <span v-if="isExcluded(r)" class="chip border-warn/40 text-warn/90 bg-warn/10">未计入</span>
+                <span v-else-if="r.pass === true" class="chip border-pass/40 text-pass bg-pass/10">通过</span>
+                <span v-else class="chip border-fail/40 text-fail bg-fail/10">不通过</span>
               </td>
               <td class="px-3 py-1.5 text-ink-400 truncate max-w-[120px] align-top" :title="r.statusLabel">{{ r.statusLabel }}</td>
               <td class="px-3 py-1.5 align-top">

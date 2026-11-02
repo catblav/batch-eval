@@ -100,3 +100,18 @@ export async function exportJson(results, columns) {
     toast("导出失败：" + e, "err");
   }
 }
+
+/// 完整报告：概览（通过率 / 关键指标）+ 失败分类 + 未计入明细 + 分组汇总 + 全部明细，一个 xlsx 多 sheet
+export async function exportFullReport(payload) {
+  try {
+    const path = await save({
+      defaultPath: "评测报告.xlsx",
+      filters: [{ name: "Excel 工作簿", extensions: ["xlsx"] }],
+    });
+    if (!path) return;
+    await invoke("export_excel_report", { path, payload });
+    toast(`完整报告已导出：${payload.rows.length} 条明细`, "ok");
+  } catch (e) {
+    toast("导出失败：" + e, "err");
+  }
+}

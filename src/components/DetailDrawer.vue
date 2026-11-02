@@ -1,6 +1,6 @@
 <script setup>
 import { computed } from "vue";
-import { state } from "../store";
+import { state, isExcluded } from "../store";
 
 const props = defineProps({ index: { type: Number, default: -1 } });
 const emit = defineEmits(["close"]);
@@ -21,9 +21,9 @@ function copy(text) {
     <div class="relative w-[min(860px,92vw)] h-full bg-ink-900 border-l border-ink-700 flex flex-col slide-in">
       <div class="flex items-center gap-2 px-4 py-3 border-b border-ink-700/60">
         <span class="text-[13px] font-semibold">第 {{ row.index + 1 }} 条</span>
-        <span class="chip" :class="row.pass === true ? 'border-pass/40 text-pass bg-pass/10' : 'border-fail/40 text-fail bg-fail/10'">
-          {{ row.pass === true ? "通过" : "不通过" }}
-        </span>
+        <span v-if="isExcluded(row)" class="chip border-warn/40 text-warn bg-warn/10">未计入通过率</span>
+        <span v-else-if="row.pass === true" class="chip border-pass/40 text-pass bg-pass/10">通过</span>
+        <span v-else class="chip border-fail/40 text-fail bg-fail/10">不通过</span>
         <span class="chip border-ink-700 text-ink-400">{{ row.statusLabel }}</span>
         <span class="flex-1" />
         <button class="btn-ghost text-[12px]" @click="copy(row.output)">复制输出</button>

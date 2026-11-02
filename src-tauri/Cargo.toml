@@ -1,6 +1,6 @@
 [package]
 name = "batch-eval"
-version = "0.1.1"
+version = "0.1.2"
 description = "批量评测台"
 authors = ["you"]
 edition = "2021"
@@ -24,6 +24,7 @@ csv = "1"
 encoding_rs = "0.8"
 futures = "0.3"
 fancy-regex = "0.14"
+rust_xlsxwriter = "0.102"
 
 [profile.release]
 opt-level = "s"
