@@ -21,3 +21,8 @@ Thumbs.db
 .vscode/
 .idea/
 *.log
+
+# 开发过程文档（本地保留，不进仓库）
+FEEDBACK.md
+PROGRESS.md
+DEV_PLAN.md
