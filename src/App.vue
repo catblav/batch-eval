@@ -1,7 +1,6 @@
 <script setup>
 import { onMounted, computed, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
 import { state, loadSettings, attachRunListener, stats, toggleTheme, toast } from "./store";
 import ApiProfileForm from "./components/ApiProfileForm.vue";
 import PromptsPanel from "./components/PromptsPanel.vue";
@@ -38,10 +37,8 @@ async function loadIteratePaths() {
   }
 }
 
-async function pickWorkdir() {
-  const dir = await open({ directory: true, multiple: false, title: "选择放着提示词和数据集的工作目录" });
-  if (!dir) return;
-  guideText.value = `请读取 ${iteratePaths.value.guide}，按里面的说明帮我评测数据和改进提示词。工作目录：${dir}`;
+async function copyGuide() {
+  guideText.value = `请读取 ${iteratePaths.value.guide}`;
   const ok = await copyText(guideText.value);
   toast(ok ? "引导语已复制" : "已生成引导语，请手动复制", ok ? "ok" : "info");
 }
@@ -112,13 +109,13 @@ onMounted(async () => {
                 <div>
                   <div class="text-[13px] font-medium">自动迭代脚本</div>
                   <p class="hint mt-1 max-w-[820px]">
-                    给 Claude、Codex 这类 agent 用。脚本和说明随应用安装。选一个工作目录，把被测提示词、评测提示词和数据集放进去，再把下面这句话发给 agent；它会建好子目录并接着跑。
+                    给 Claude、Codex 这类 agent 用。脚本和说明随应用安装。把下面这句话发给 agent，剩下的它会引导你完成。
                   </p>
-                  <p v-if="iteratePaths" class="hint mt-1 break-all">脚本：{{ iteratePaths.script }}</p>
+                  <p v-if="iteratePaths" class="hint mt-1 break-all">手册：{{ iteratePaths.guide }}</p>
                   <p v-else class="hint mt-1">读取脚本路径失败，请重试或重新安装应用。</p>
                 </div>
-                <button class="btn-primary text-[12px] shrink-0" :disabled="!iteratePaths" @click="pickWorkdir">
-                  选择工作目录
+                <button class="btn-primary text-[12px] shrink-0" :disabled="!iteratePaths" @click="copyGuide">
+                  复制引导语
                 </button>
               </div>
               <textarea v-if="guideText" readonly :value="guideText" rows="3"
