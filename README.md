@@ -177,7 +177,3 @@ runs/current/results.jsonl  每跑完一条追加一行
 
 - 自动迭代脚本和说明随应用安装
 - 只用 Python 标准库，Python 3.8 以上即可
-
-node tests/gen-dataset.mjs 10000
-MOCK_DELAY_MS=300 MOCK_FAIL_RATE=0.05 node tests/mock-api.mjs
-```
