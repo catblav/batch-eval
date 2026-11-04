@@ -38,8 +38,6 @@ xattr -cr "/Applications/黑猫-自动评测台.app"
 
 协议选 OpenAI 兼容或 Anthropic。其它可配项有上下文长度、max_tokens、temperature、top_p、超时、自定义请求体和请求头。填完可以点 **测试连接** 验证。
 
-页面底部是「自动迭代脚本」，点「复制引导语」得到一句发给 agent 的话，详见 [自动迭代脚本](#自动迭代脚本)。
-
 ![API 配置](docs/screenshots/01-api.png)
 
 ### 2. 提示词
@@ -93,11 +91,11 @@ xattr -cr "/Applications/黑猫-自动评测台.app"
 ### 使用方法
 
 1. 下载并安装「黑猫-自动评测台」。
-2. 打开「① API 配置」，页面底部是「自动迭代脚本」，点「复制引导语」，把这句话发给 Claude、Codex 这类 agent：
+2. 复制下面这段话，把这句话发给你的agent（claude code/codex等）：
 
    > 请读取 `<安装目录>/auto-iterate/guide_agent.md`
 
-剩下由 agent 引导：指定工作目录、配置 API、放提示词和数据集，然后读文件、跑测试、改提示词。
+剩下的流程将由agent引导你完成：指定工作目录、配置 API、放提示词和数据集，然后读文件、跑测试、改提示词。
 
 ### 建议
 
