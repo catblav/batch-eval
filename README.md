@@ -1,8 +1,9 @@
 # 黑猫-自动评测台
 
 本地桌面工具。填好自己的 LLM API，批量跑评测数据，按评测提示词给出的分类统计结果。
+（更新）新增自动脚本，接入agent可自动跑测评数据，自动迭代提示词。
 
-Windows 和 macOS 都能用。
+支持win和mac。
 
 ![分析页](docs/screenshots/05-analysis.png)
 
