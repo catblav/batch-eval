@@ -38,8 +38,6 @@ xattr -cr "/Applications/黑猫-自动评测台.app"
 
 协议选 OpenAI 兼容或 Anthropic。其它可配项有上下文长度、max_tokens、temperature、top_p、超时、自定义请求体和请求头。填完可以点 **测试连接** 验证。
 
-页面底部是「自动迭代脚本」，点「复制引导语」得到一句发给 agent 的话，详见 [自动迭代脚本](#自动迭代脚本)。
-
 ![API 配置](docs/screenshots/01-api.png)
 
 ### 2. 提示词
