@@ -14,7 +14,7 @@
 
 ### Windows
 
-下载 `黑猫-自动评测台_0.1.3_x64-setup.exe` 运行安装。
+下载 `Heimao-AutoEval_0.1.3_x64-setup.exe` 运行安装。
 
 ### macOS
 
