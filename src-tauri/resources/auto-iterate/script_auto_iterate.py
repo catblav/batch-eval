@@ -8,11 +8,13 @@
 目录约定（只是默认值，都能用参数覆盖）：
 
   <工作目录>/
-  ├─ 脚本/脚本_提示词自动迭代.py
   ├─ 评测提示词/   裁判提示词、被测提示词
   ├─ 评测数据/     数据集（csv / json / xlsx）
   ├─ 评测输出/     完整结果、缓存、审计日志
   └─ 提示词历史/   提示词版本存档
+
+脚本和说明随应用安装，通常不需要放进工作目录。工作目录默认为当前目录，
+也可以用 --workdir 指定；所有输出和默认路径都相对于它。
 
 脚本唯一假定的，是模板里的变量关系：
 
@@ -48,10 +50,13 @@ import sys
 import time
 import urllib.request
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-# 脚本可能放在「脚本/」子目录里，状态目录（输出、存档、日志）统一放到工作目录根。
-PARENT = os.path.dirname(HERE)
-DEFAULT_STATE_DIR = HERE if os.path.basename(HERE) != "脚本" else PARENT
+# 脚本随应用安装，安装目录只读使用。工作目录取当前目录或 --workdir，
+# 状态、输出、存档、默认的提示词/数据目录都相对于它。
+def workdir_of(args):
+    wd = getattr(args, "workdir", None)
+    return os.path.abspath(wd) if wd else os.getcwd()
+
+
 APP_ID = "com.batcheval.app"
 STATE_NAME = "regression_state.json"
 ARCHIVE_DIR_NAME = "提示词历史"
@@ -122,7 +127,7 @@ def load_runtime(args):
                 "config.json 缺少 userTemplate。\n"
                 "它是被测模型的 user 消息模板，用数据集的列名写，例如 \"{{content}}\"，"
                 "也可以用 --user-template 指定。")
-        rows = load_dataset(args.dataset or find_dataset(os.path.join(PARENT, "评测数据")))
+        rows = load_dataset(args.dataset or find_dataset(os.path.join(workdir_of(args), "评测数据")))
         return target, judge, system_tpl, user_tpl, rows, "config"
 
     cfg_dir = args.config_dir or default_config_dir()
@@ -137,7 +142,7 @@ def load_runtime(args):
     if not dataset_path:
         app_dataset = os.path.join(cfg_dir, "dataset.json")
         dataset_path = (app_dataset if os.path.isfile(app_dataset)
-                        else find_dataset(os.path.join(PARENT, "评测数据")))
+                        else find_dataset(os.path.join(workdir_of(args), "评测数据")))
     rows = load_dataset(dataset_path)
     st = settings.get("settings") or {}
     target = expand_cfg(st.get("target") or {})
@@ -679,7 +684,7 @@ def resolve_plan(args):
 # ---------- 主流程 ----------
 
 def run(args):
-    state_dir = args.state_dir or DEFAULT_STATE_DIR
+    state_dir = args.state_dir or workdir_of(args)
     state = load_state(state_dir)
     # 旧状态文件或缺字段时不崩，缺什么补什么
     state.setdefault("round_limit", 5)
@@ -725,8 +730,8 @@ def run(args):
     # 裁判提示词：显式指定 > 同目录 prompt_judge.md > 评测提示词/ 下唯一一份
     judge_path = args.prompt_judge
     if not judge_path:
-        cand = os.path.join(HERE, "prompt_judge.md")
-        judge_dir = os.path.join(PARENT, "评测提示词")
+        cand = os.path.join(workdir_of(args), "prompt_judge.md")
+        judge_dir = os.path.join(workdir_of(args), "评测提示词")
         hits = ([os.path.join(judge_dir, n) for n in sorted(os.listdir(judge_dir))
                  if n.lower().endswith((".md", ".txt"))] if os.path.isdir(judge_dir) else [])
         judge_path = cand if os.path.isfile(cand) else (hits[0] if len(hits) == 1 else "")
@@ -959,6 +964,7 @@ def main():
     ap.add_argument("--history", action="store_true", help="列出提示词存档")
     ap.add_argument("--restore", default=None, metavar="ID", help="打印回滚命令")
     ap.add_argument("--reset", action="store_true", help="清空迭代状态")
+    ap.add_argument("--workdir", default=None, help="工作目录，默认当前目录；输出、存档和默认提示词/数据目录都相对它")
     ap.add_argument("--state-dir", default=None, help="状态/存档/日志/输出目录")
     ap.add_argument("--config-dir", default=None, help="批量评测台配置目录")
     ap.add_argument("--settings", default=None, help="settings.json")

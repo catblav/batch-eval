@@ -27,6 +27,11 @@
   },
   "bundle": {
     "active": true,
+    "resources": {
+      "resources/auto-iterate/script_auto_iterate.py": "auto-iterate/script_auto_iterate.py",
+      "resources/auto-iterate/guide_agent.md": "auto-iterate/guide_agent.md",
+      "resources/auto-iterate/guide_user.md": "auto-iterate/guide_user.md"
+    },
     "targets": [
       "nsis"
     ],

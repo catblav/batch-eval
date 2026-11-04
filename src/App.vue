@@ -26,21 +26,43 @@ const toastColor = computed(() => {
   return "border-accent/50 text-accent bg-accent/10";
 });
 
-// 自动迭代脚本编译在应用内，导出成一份可直接交给 agent 的工作目录
-const packExporting = ref(false);
-const packPath = ref("");
+// 自动迭代脚本随应用安装，用户自己建工作目录，这里只给路径和可复制的引导语
+const iteratePaths = ref(null);
+const guideText = ref("");
 
-async function exportPack() {
-  const dir = await open({ directory: true, multiple: false, title: "选择导出到哪个文件夹" });
-  if (!dir) return;
-  packExporting.value = true;
+async function loadIteratePaths() {
   try {
-    packPath.value = await invoke("export_script_pack", { dest: dir });
-    toast("脚本包已导出", "ok");
+    iteratePaths.value = await invoke("auto_iterate_paths");
   } catch (e) {
-    toast(String(e), "err");
-  } finally {
-    packExporting.value = false;
+    iteratePaths.value = null;
+  }
+}
+
+async function pickWorkdir() {
+  const dir = await open({ directory: true, multiple: false, title: "选择放着提示词和数据集的工作目录" });
+  if (!dir) return;
+  guideText.value = `请读取 ${iteratePaths.value.guide}，按里面的说明帮我评测数据和改进提示词。工作目录：${dir}`;
+  const ok = await copyText(guideText.value);
+  toast(ok ? "引导语已复制" : "已生成引导语，请手动复制", ok ? "ok" : "info");
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (e) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try {
+      ok = document.execCommand("copy");
+    } catch (_) {}
+    document.body.removeChild(ta);
+    return ok;
   }
 }
 
@@ -48,6 +70,7 @@ onMounted(async () => {
   // 进度监听放在全局：切到其他页时 RunPanel 会卸载，事件不能跟着丢
   await attachRunListener();
   await loadSettings();
+  await loadIteratePaths();
 });
 </script>
 
@@ -84,19 +107,23 @@ onMounted(async () => {
               被测模型跑出结果，评测模型拿评测提示词逐条判定。两个可以是同一个 API，也可以分开；判定要稳定时，评测模型建议用 temperature 0。
             </p>
 
-            <div class="card p-4">
+            <div class="card p-4 space-y-2">
               <div class="flex items-start justify-between gap-4">
                 <div>
                   <div class="text-[13px] font-medium">自动迭代脚本</div>
                   <p class="hint mt-1 max-w-[820px]">
-                    给 Claude、Codex 这类 agent 用。导出一个工作目录，里面有脚本、使用说明和标准文件夹；把这个文件夹交给 agent，它就能按你的数据和判定标准反复跑测试、改提示词。
+                    给 Claude、Codex 这类 agent 用。脚本和说明随应用安装。选一个工作目录，把被测提示词、评测提示词和数据集放进去，再把下面这句话发给 agent；它会建好子目录并接着跑。
                   </p>
+                  <p v-if="iteratePaths" class="hint mt-1 break-all">脚本：{{ iteratePaths.script }}</p>
+                  <p v-else class="hint mt-1">读取脚本路径失败，请重试或重新安装应用。</p>
                 </div>
-                <button class="btn-primary text-[12px] shrink-0" :disabled="packExporting" @click="exportPack">
-                  {{ packExporting ? "导出中…" : "导出脚本包" }}
+                <button class="btn-primary text-[12px] shrink-0" :disabled="!iteratePaths" @click="pickWorkdir">
+                  选择工作目录
                 </button>
               </div>
-              <p v-if="packPath" class="hint mt-2">已导出到 {{ packPath }}，打开里面的「怎么用.txt」。</p>
+              <textarea v-if="guideText" readonly :value="guideText" rows="3"
+                class="w-full text-[12px] bg-ink-850 border border-ink-700/60 rounded p-2 resize-none"
+                @focus="$event.target.select()"></textarea>
             </div>
           </div>
         </template>

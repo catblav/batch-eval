@@ -31,7 +31,7 @@ pub fn run() {
             runner::cancel_run,
             runner::probe_api,
             runner::test_connection,
-            script_pack::export_script_pack,
+            script_pack::auto_iterate_paths,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
