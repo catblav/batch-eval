@@ -44,12 +44,12 @@ jobs:
           VER=$(jq -r .version src-tauri/tauri.conf.json)
           mkdir -p artifacts
           find src-tauri/target/universal-apple-darwin/release/bundle/dmg -name "*.dmg" \
-            -exec cp {} "artifacts/BatchEval_${VER}_macOS_universal.dmg" \;
+            -exec cp {} "artifacts/Heimao-AutoEval_${VER}_macOS_universal.dmg" \;
           ls -lh artifacts
 
       - name: 上传 dmg
         uses: actions/upload-artifact@v7
         with:
-          name: BatchEval-macos-universal
+          name: Heimao-AutoEval-macos-universal
           path: artifacts/*.dmg
           if-no-files-found: error

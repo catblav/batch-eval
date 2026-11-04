@@ -246,9 +246,21 @@ mod tests {
             judge_latency_ms: 1,
             prompt_tokens: None,
             completion_tokens: None,
+            judge_prompt_tokens: None,
+            judge_completion_tokens: None,
             truncated: false,
             status_label: "g".into(),
         }
+    }
+
+    /// 旧版结果文件没有裁判 tokens 两个字段，加了新字段后必须还能读，
+    /// 否则升级一次就把用户的历史结果全判成坏行。
+    #[test]
+    fn old_rows_without_judge_tokens_still_parse() {
+        let raw = r#"{"index":0,"input":"a","output":"b","targetError":null,"pass":true,"errorTypes":[],"reasons":[],"details":"","judgeRaw":"","parseOk":true,"targetLatencyMs":10,"judgeLatencyMs":20,"promptTokens":null,"completionTokens":null,"truncated":false,"statusLabel":"g"}"#;
+        let r: RowResult = serde_json::from_str(raw).unwrap();
+        assert!(r.judge_prompt_tokens.is_none());
+        assert!(r.judge_completion_tokens.is_none());
     }
 
     fn temp_dir(name: &str) -> PathBuf {

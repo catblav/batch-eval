@@ -20,6 +20,9 @@ import Field from "./Field.vue";
 import Pager from "./Pager.vue";
 
 const err = ref("");
+// 取消是异步的：后端要中断在途请求并收尾落盘，这期间给个明确反馈，
+// 否则用户点完看不到变化，会以为按钮没生效（这正是之前的实际感受）
+const cancelling = ref(false);
 
 const sel = state.settings;
 const run = state.run;
@@ -72,6 +75,38 @@ function onPageSize(n) {
   page.value = follow.value ? pageCount.value : 1;
 }
 
+// 耗时拆分：把「跑得慢」落到具体是哪一步。
+// 被测 / 评测各自取已完成行的中位数（平均值容易被个别超时行带偏），
+// 再按并发折算剩余时间，比干等进度条有信息量。
+const timing = computed(() => {
+  const list = run.results;
+  if (!list.length) return null;
+  const median = (arr) => {
+    const s = [...arr].sort((a, b) => a - b);
+    const m = Math.floor(s.length / 2);
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  };
+  const targetMs = median(list.map((r) => r.targetLatencyMs || 0));
+  const judgeMs = median(list.map((r) => r.judgeLatencyMs || 0));
+  const perRowMs = targetMs + judgeMs;
+  const conc = Math.max(1, Number(sel.concurrency) || 1);
+  const remain = Math.max(0, (run.total || state.dataset.rows.length) - run.done);
+  return {
+    targetMs,
+    judgeMs,
+    perRowMs,
+    judgeShare: perRowMs ? judgeMs / perRowMs : 0,
+    etaMs: perRowMs * Math.ceil(remain / conc),
+    conc,
+  };
+});
+
+function fmtDur(ms) {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
+}
+
 const progress = computed(() => (run.total ? run.done / run.total : 0));
 const elapsedText = computed(() => {
   const ms = run.elapsed || 0;
@@ -81,6 +116,7 @@ const elapsedText = computed(() => {
 
 async function start(mode = "new", onlyIndices = null) {
   err.value = "";
+  cancelling.value = false;
   ensureUserTemplate();
   if (ready.value.length) {
     err.value = "还有没填好的地方：" + ready.value.join("、");
@@ -165,6 +201,7 @@ async function start(mode = "new", onlyIndices = null) {
     run.error = String(e);
     toast(String(e), "err");
   } finally {
+    cancelling.value = false;
     finishRunSession(status);
   }
 }
@@ -187,10 +224,18 @@ async function clearAll() {
 }
 
 async function cancel() {
+  if (cancelling.value) return;
+  cancelling.value = true;
   try {
-    await invoke("cancel_run", { runId: run.runId });
-    toast("已停止发起新请求，在途请求会自然结束", "info");
+    const found = await invoke("cancel_run", { runId: run.runId });
+    if (found) {
+      toast("正在取消，在途请求已中断", "info");
+    } else {
+      cancelling.value = false;
+      toast("没有找到正在运行的本次任务，可能已经结束了", "info");
+    }
   } catch (e) {
+    cancelling.value = false;
     toast(String(e), "err");
   }
 }
@@ -203,6 +248,7 @@ const failedCount = computed(
 );
 
 const statusText = computed(() => {
+  if (run.running && cancelling.value) return "正在取消…";
   if (run.running) return "运行中…";
   if (run.status === "cancelled") return "已取消";
   if (run.status === "failed") return "运行失败";
@@ -242,6 +288,18 @@ const statusText = computed(() => {
       <div class="h-2 rounded-full bg-ink-800 overflow-hidden">
         <div class="h-full bg-accent transition-all duration-300" :style="{ width: (progress * 100).toFixed(1) + '%' }" />
       </div>
+      <div v-if="timing" class="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2 text-[12px] text-ink-400">
+        <span>
+          单条耗时（中位）：被测 {{ (timing.targetMs / 1000).toFixed(1) }}s + 评测
+          {{ (timing.judgeMs / 1000).toFixed(1) }}s = {{ (timing.perRowMs / 1000).toFixed(1) }}s
+        </span>
+        <span v-if="timing.judgeShare > 0.5" class="text-warn">
+          评测模型占 {{ Math.round(timing.judgeShare * 100) }}%
+        </span>
+        <span class="flex-1" />
+        <span v-if="run.running" class="hint">并发 {{ timing.conc }} · 预计还需 {{ fmtDur(timing.etaMs) }}</span>
+      </div>
+
       <div class="flex items-center gap-3 mt-2 text-[12px] text-ink-400">
         <span>{{ run.done }} / {{ run.total || state.dataset.rows.length }}</span>
         <span v-if="run.results.length">
@@ -255,7 +313,9 @@ const statusText = computed(() => {
 
       <div class="flex gap-2 mt-4">
         <button class="btn-primary" :disabled="run.running" @click="start('new')">开始批量评测</button>
-        <button v-if="run.running" class="btn-danger" @click="cancel">取消</button>
+        <button v-if="run.running" class="btn-danger" :disabled="cancelling" @click="cancel">
+          {{ cancelling ? "取消中…" : "取消" }}
+        </button>
         <button class="btn" :disabled="run.running || !canResume" @click="start('resume')">断点续跑</button>
         <button class="btn" :disabled="run.running || !failedCount" @click="start('retry')">
           重跑未通过项（{{ failedCount }}）

@@ -4,6 +4,7 @@ mod judge;
 mod report;
 mod run_store;
 mod runner;
+mod script_pack;
 mod storage;
 
 #[cfg(test)]
@@ -28,7 +29,9 @@ pub fn run() {
             report::export_excel_report,
             runner::start_run,
             runner::cancel_run,
+            runner::probe_api,
             runner::test_connection,
+            script_pack::export_script_pack,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -51,6 +51,11 @@ pub struct RowResult {
     pub judge_latency_ms: u64,
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
+    /// 裁判这一侧的 tokens。旧结果文件没有这两个字段，必须给默认值，否则整行会被当成坏行
+    #[serde(default)]
+    pub judge_prompt_tokens: Option<u64>,
+    #[serde(default)]
+    pub judge_completion_tokens: Option<u64>,
     pub truncated: bool,
     pub status_label: String,
 }
@@ -87,12 +92,16 @@ impl RunRegistry {
         }
     }
 
-    fn cancel(&self, id: &str) {
+    /// 返回是否真的找到了这次运行：找不到说明它已经结束了，
+    /// 前端据此提示用户，而不是无脑弹「已取消」。
+    fn cancel(&self, id: &str) -> bool {
         if let Ok(map) = self.flags.lock() {
             if let Some(flag) = map.get(id) {
                 flag.store(true, Ordering::SeqCst);
+                return true;
             }
         }
+        false
     }
 }
 
@@ -153,6 +162,16 @@ async fn sleep_cancellable(ms: u64, flag: &AtomicBool) -> bool {
     }
 }
 
+/// 等待取消信号：每 80ms 检查一次标志，配合 `tokio::select!` 使用。
+///
+/// 取消时 select 会丢弃另一分支的 future，reqwest 的请求随之被中止，
+/// 不必等它自然返回或超时——这才叫「取消」而不是「不再发起新的」。
+async fn cancel_signal(flag: &AtomicBool) {
+    while !flag.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(80)).await;
+    }
+}
+
 /// 全局限速闸门：任一请求收到 429/503 的 Retry-After 后，所有任务一起等到该时间点。
 async fn wait_for_gate(gate: &AtomicU64, flag: &AtomicBool) -> bool {
     loop {
@@ -184,7 +203,13 @@ async fn call_with_retry(
         if !wait_for_gate(gate, flag).await {
             return Err(CANCELLED.into());
         }
-        match api::chat(client, profile, system, user).await {
+        // 取消优先：已取消就不再发请求；请求在途时取消会立刻丢弃 future，断开连接
+        let sent = tokio::select! {
+            biased;
+            _ = cancel_signal(flag) => return Err(CANCELLED.into()),
+            r = api::chat(client, profile, system, user) => r,
+        };
+        match sent {
             Ok(r) => return Ok(r),
             Err(e) => {
                 if flag.load(Ordering::SeqCst) {
@@ -251,6 +276,8 @@ async fn run_one(
         judge_latency_ms: 0,
         prompt_tokens: None,
         completion_tokens: None,
+        judge_prompt_tokens: None,
+        judge_completion_tokens: None,
         truncated: false,
         status_label: status_label.to_string(),
     };
@@ -303,6 +330,8 @@ async fn run_one(
     {
         Ok(r) => {
             res.judge_latency_ms = r.latency_ms;
+            res.judge_prompt_tokens = r.prompt_tokens;
+            res.judge_completion_tokens = r.completion_tokens;
             let v = judge::parse_verdict(&r.text);
             res.pass = v.pass;
             res.error_types = v.error_types;
@@ -490,11 +519,13 @@ pub async fn start_run(
         error: None,
     });
     meta.run_id = cfg.run_id.clone();
-    meta.total = meta.total.max(rows.len());
+    meta.total = rows.len();
     meta.status = run_store::STATUS_RUNNING.into();
     meta.finished_at = None;
     meta.error = None;
     if cfg.mode == "new" {
+        // 新一轮要重算开始时间：沿用旧 meta 会让重启后的「已用时长」显示成上一轮的总时长
+        meta.started_at = run_store::now_ms();
         run_store::reset(&dir, &meta)?;
     } else {
         run_store::write_meta(&dir, &meta)?;
@@ -617,9 +648,8 @@ pub async fn start_run(
 }
 
 #[tauri::command]
-pub async fn cancel_run(app: AppHandle, run_id: String) -> Result<(), String> {
-    app.state::<RunRegistry>().cancel(&run_id);
-    Ok(())
+pub async fn cancel_run(app: AppHandle, run_id: String) -> Result<bool, String> {
+    Ok(app.state::<RunRegistry>().cancel(&run_id))
 }
 
 #[cfg(test)]
@@ -707,6 +737,8 @@ mod tests {
             judge_latency_ms: 0,
             prompt_tokens: None,
             completion_tokens: None,
+            judge_prompt_tokens: None,
+            judge_completion_tokens: None,
             truncated: false,
             status_label: "g".into(),
         };
@@ -734,6 +766,92 @@ mod tests {
         }
         assert_eq!(jitter_ms(0), 0);
     }
+
+    /// 回归用：取消必须打断在途请求。
+    /// 曾经的实现只在「发起下一个请求前」检查标志，一个卡住的请求能把取消拖到超时（默认 180s），
+    /// 用户点完取消毫无反应。
+    #[tokio::test]
+    async fn cancel_aborts_inflight_request() {
+        use std::io::Read;
+        use std::net::TcpListener;
+
+        // 只收请求、永不应答，模拟一个卡死的接口
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf);
+                std::thread::sleep(Duration::from_secs(30));
+            }
+        });
+
+        let profile = ApiProfile {
+            protocol: "openai".into(),
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            api_key: "test".into(),
+            model: "mock".into(),
+            temperature: None,
+            top_p: None,
+            max_tokens: Some(64),
+            context_window: None,
+            timeout_secs: Some(30),
+            extra_body: None,
+            extra_headers: None,
+        };
+        let client = crate::api::build_client(&profile).unwrap();
+        let flag = Arc::new(AtomicBool::new(false));
+        let gate = AtomicU64::new(0);
+
+        let f = flag.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            f.store(true, Ordering::SeqCst);
+        });
+
+        let started = Instant::now();
+        let res = call_with_retry(&client, &profile, "", "ping", 0, &flag, &gate).await;
+        let elapsed = started.elapsed();
+        assert!(matches!(&res, Err(e) if e == CANCELLED), "实际返回：{res:?}");
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "取消应立刻生效，实际等了 {elapsed:?}"
+        );
+    }
+}
+
+/// 一次测速调用的结果
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeCall {
+    pub latency_ms: u64,
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub finish_reason: Option<String>,
+    pub reply: String,
+}
+
+/// 测速：连续 3 次极短请求，用来把「慢」拆成两段看。
+///
+/// 输入只有几个 token，排除了提示词长度的影响：
+/// - 3 次都在 1~3 秒 → 接口和网络正常，慢在模型生成（裁判提示词太长 / 模型在思考）
+/// - 单次就几十秒 → 模型本身慢或上游排队，跟本工具无关
+/// - 忽快忽慢、偶发 429 → 限流，降并发或换 Key
+#[tauri::command]
+pub async fn probe_api(profile: ApiProfile) -> Result<Vec<ProbeCall>, String> {
+    let client = api::build_client(&profile)?;
+    let mut out = Vec::with_capacity(3);
+    for _ in 0..3 {
+        let r = api::chat(&client, &profile, "", "只回复两个字：收到").await?;
+        out.push(ProbeCall {
+            latency_ms: r.latency_ms,
+            prompt_tokens: r.prompt_tokens,
+            completion_tokens: r.completion_tokens,
+            finish_reason: r.finish_reason,
+            reply: r.text.chars().take(40).collect(),
+        });
+    }
+    Ok(out)
 }
 
 #[tauri::command]

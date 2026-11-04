@@ -1,6 +1,7 @@
 <script setup>
 import { computed, ref } from "vue";
 import { state, ensureUserTemplate, syncTemplateVars, templateVarCheck, toast } from "../store";
+import { DEFAULT_SYSTEM_PROMPT, DEFAULT_EVAL_PROMPT, DEFAULT_NOTES, defaultUserTemplate } from "../defaultPrompts";
 import { invoke } from "@tauri-apps/api/core";
 import { save, open } from "@tauri-apps/plugin-dialog";
 
@@ -86,6 +87,44 @@ function syncVars() {
   const n = syncTemplateVars();
   if (n) toast(`已补入 ${n} 个未引用的列`, "ok");
 }
+
+// ---------- 默认模板 ----------
+// 点「恢复默认」先弹出预览，确认后才覆盖编辑框，避免误点丢掉手上改好的提示词
+const defaultDialog = ref(null);
+
+const TITLES = {
+  systemPrompt: "主体提示词",
+  userTemplate: "用户消息模板",
+  evalPrompt: "评测提示词",
+};
+
+function defaultTextOf(which) {
+  if (which === "systemPrompt") return DEFAULT_SYSTEM_PROMPT;
+  if (which === "evalPrompt") return DEFAULT_EVAL_PROMPT;
+  return defaultUserTemplate(state.selectedColumns);
+}
+
+function openDefault(which) {
+  defaultDialog.value = {
+    which,
+    title: TITLES[which],
+    note: DEFAULT_NOTES[which],
+    text: defaultTextOf(which),
+  };
+}
+
+function applyDefault() {
+  const d = defaultDialog.value;
+  if (!d) return;
+  state.prompts[d.which] = d.text;
+  defaultDialog.value = null;
+  toast(`已填入默认${d.title}`, "ok");
+}
+
+function copyDefault() {
+  navigator.clipboard.writeText(defaultDialog.value?.text || "");
+  toast("已复制默认模板", "ok");
+}
 </script>
 
 <template>
@@ -96,6 +135,7 @@ function syncVars() {
         <span class="hint">被测模型的 system prompt</span>
         <span class="flex-1" />
         <span class="hint">{{ sysLen }} 字</span>
+        <button class="btn-ghost text-[12px]" @click="openDefault('systemPrompt')">恢复默认</button>
         <button class="btn-ghost text-[12px]" @click="importPrompt('systemPrompt')">导入文件</button>
         <button class="btn-ghost text-[12px]" @click="exportPrompt('systemPrompt')">导出</button>
       </div>
@@ -108,6 +148,7 @@ function syncVars() {
         <span class="text-[13px] font-semibold">用户消息模板</span>
         <span class="hint">用 <code class="font-mono">&#123;&#123;列名&#125;&#125;</code> 注入数据列，跑测时逐行替换</span>
         <span class="flex-1" />
+        <button class="btn-ghost text-[12px]" @click="openDefault('userTemplate')">恢复默认</button>
         <button class="btn-ghost text-[12px]" @click="fillTemplate">按数据集列生成</button>
       </div>
       <textarea v-model="state.prompts.userTemplate" rows="6" class="field-mono w-full"
@@ -153,6 +194,7 @@ function syncVars() {
         <span class="chip" :class="hasOutputContract ? 'border-pass/40 text-pass bg-pass/10' : 'border-warn/40 text-warn bg-warn/10'">
           {{ hasOutputContract ? "含 pass 字段" : "未见 pass 字段" }}
         </span>
+        <button class="btn-ghost text-[12px]" @click="openDefault('evalPrompt')">恢复默认</button>
         <button class="btn-ghost text-[12px]" @click="importPrompt('evalPrompt')">导入文件</button>
         <button class="btn-ghost text-[12px]" @click="exportPrompt('evalPrompt')">导出</button>
       </div>
@@ -197,6 +239,27 @@ function syncVars() {
         <div>
           <div class="hint mb-1">评测模型 · user（评测提示词渲染后）</div>
           <pre class="bg-ink-950 border border-ink-800 rounded p-3 text-[12px] font-mono whitespace-pre-wrap max-h-64 overflow-auto text-ink-200">{{ previewJudge }}</pre>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="defaultDialog" class="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div class="absolute inset-0 bg-black/50" @click="defaultDialog = null" />
+      <div class="relative w-[min(780px,94vw)] max-h-[86vh] bg-ink-900 border border-ink-700 rounded-lg flex flex-col">
+        <div class="flex items-center gap-2 px-4 py-3 border-b border-ink-700/60">
+          <span class="text-[13px] font-semibold">默认模板 · {{ defaultDialog.title }}</span>
+          <span class="flex-1" />
+          <button class="btn-ghost text-[12px]" @click="copyDefault">复制</button>
+          <button class="btn-ghost text-[12px]" @click="defaultDialog = null">关闭</button>
+        </div>
+        <div class="flex-1 overflow-auto p-4 space-y-3">
+          <p class="hint">{{ defaultDialog.note }}</p>
+          <pre class="bg-ink-950 border border-ink-800 rounded p-3 text-[12px] font-mono whitespace-pre-wrap text-ink-200">{{ defaultDialog.text }}</pre>
+          <p class="text-[12px] text-warn">填入会覆盖编辑框里当前的内容。</p>
+        </div>
+        <div class="flex items-center justify-end gap-2 px-4 py-3 border-t border-ink-700/60">
+          <button class="btn-ghost text-[12px]" @click="defaultDialog = null">取消</button>
+          <button class="btn-primary text-[12px]" @click="applyDefault">填入编辑器</button>
         </div>
       </div>
     </div>

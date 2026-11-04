@@ -61,6 +61,41 @@ const savedText = computed(() => {
   return `已保存 ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 });
 
+// 测速：3 次极短请求，用来看接口本身的基线速度。
+// 和「测试连接」的区别是它给的是可比较的数字，并且带一句结论：
+// 极短输入都要几十秒，说明慢在模型或上游排队，跟本工具的提示词、并发调度无关。
+const probing = ref(false);
+const probeText = ref("");
+const probeVerdict = ref("");
+
+async function probe() {
+  probing.value = true;
+  probeText.value = "";
+  probeVerdict.value = "";
+  try {
+    const calls = await invoke("probe_api", { profile: profile.value });
+    const lat = calls.map((c) => c.latencyMs);
+    const tok = calls.map((c) => c.completionTokens || 0);
+    const sorted = [...lat].sort((a, b) => a - b);
+    const med = sorted[Math.floor(sorted.length / 2)] || 0;
+    const medTok = [...tok].sort((a, b) => a - b)[Math.floor(tok.length / 2)] || 0;
+    const tps = med ? (medTok / (med / 1000)).toFixed(1) : "—";
+    probeText.value =
+      `3 次：${lat.map((x) => (x / 1000).toFixed(1) + "s").join(" / ")}` +
+      ` · 中位 ${(med / 1000).toFixed(1)}s · 输出 ${medTok} tok · ${tps} tok/s`;
+    probeVerdict.value =
+      med > 15000
+        ? "极短输入都这么慢，问题在模型或上游排队，不是本工具"
+        : med > 5000
+          ? "偏慢，多半是上游排队或网络，换时段再测对比"
+          : "接口正常，批量跑得慢是因为单条请求本身耗时长";
+  } catch (e) {
+    probeText.value = String(e);
+  } finally {
+    probing.value = false;
+  }
+}
+
 async function test() {
   testing.value = true;
   result.value = "";
@@ -92,6 +127,9 @@ async function test() {
           同步到评测模型
         </button>
       </template>
+      <button class="btn text-[12px]" :disabled="probing" @click="probe">
+        {{ probing ? "测速中…" : "测速" }}
+      </button>
       <button class="btn text-[12px]" :disabled="testing" @click="test">
         {{ testing ? "测试中…" : "测试连接" }}
       </button>
@@ -145,5 +183,9 @@ async function test() {
     <p v-if="result" class="hint break-all whitespace-pre-wrap" :class="result.startsWith('连接成功') ? 'text-pass' : 'text-fail'">
       {{ result }}
     </p>
+    <div v-if="probeText" class="text-[12px] break-all">
+      <div :class="probeText.startsWith('3 次') ? 'text-ink-300' : 'text-fail'">{{ probeText }}</div>
+      <div v-if="probeVerdict" class="hint mt-0.5">{{ probeVerdict }}</div>
+    </div>
   </div>
 </template>

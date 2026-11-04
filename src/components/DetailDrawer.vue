@@ -10,6 +10,13 @@ const row = computed(() =>
 );
 const dataRow = computed(() => (props.index >= 0 ? state.dataset.rows[props.index] : null));
 
+/// 裁判侧的生成速度：判断「慢在模型思考」还是「慢在排队」最直接的指标
+const judgeTps = computed(() => {
+  const r = row.value;
+  if (!r || !r.judgeCompletionTokens || !r.judgeLatencyMs) return "—";
+  return (r.judgeCompletionTokens / (r.judgeLatencyMs / 1000)).toFixed(1);
+});
+
 function copy(text) {
   navigator.clipboard.writeText(text || "");
 }
@@ -56,8 +63,11 @@ function copy(text) {
         <div class="grid grid-cols-4 gap-2 text-[11.5px] text-ink-500">
           <div>被测耗时：<span class="text-ink-300">{{ (row.targetLatencyMs / 1000).toFixed(2) }}s</span></div>
           <div>评测耗时：<span class="text-ink-300">{{ (row.judgeLatencyMs / 1000).toFixed(2) }}s</span></div>
-          <div>输入 tokens：<span class="text-ink-300">{{ row.promptTokens ?? "—" }}</span></div>
-          <div>输出 tokens：<span class="text-ink-300">{{ row.completionTokens ?? "—" }}</span></div>
+          <div>被测 tokens：<span class="text-ink-300">{{ row.promptTokens ?? "—" }} → {{ row.completionTokens ?? "—" }}</span></div>
+          <div>裁判 tokens：<span class="text-ink-300">{{ row.judgePromptTokens ?? "—" }} → {{ row.judgeCompletionTokens ?? "—" }}</span></div>
+          <div class="col-span-2" v-if="row.judgeCompletionTokens">
+            裁判生成速度：<span class="text-ink-300">{{ judgeTps }} tok/s</span>
+          </div>
         </div>
 
         <div>

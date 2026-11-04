@@ -631,7 +631,7 @@ pub async fn export_excel_report(path: String, payload: ReportPayload) -> Result
             } else {
                 &payload.target_profile.model
             })
-            .set_author("批量评测台"),
+            .set_author("黑猫-自动评测台"),
     );
 
     wb.save(&path)
