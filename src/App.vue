@@ -1,7 +1,6 @@
 <script setup>
-import { onMounted, computed, ref } from "vue";
-import { invoke } from "@tauri-apps/api/core";
-import { state, loadSettings, attachRunListener, stats, toggleTheme, toast } from "./store";
+import { onMounted, computed } from "vue";
+import { state, loadSettings, attachRunListener, stats, toggleTheme } from "./store";
 import ApiProfileForm from "./components/ApiProfileForm.vue";
 import PromptsPanel from "./components/PromptsPanel.vue";
 import DatasetPanel from "./components/DatasetPanel.vue";
@@ -25,49 +24,10 @@ const toastColor = computed(() => {
   return "border-accent/50 text-accent bg-accent/10";
 });
 
-// 自动迭代脚本随应用安装，用户自己建工作目录，这里只给路径和可复制的引导语
-const iteratePaths = ref(null);
-const guideText = ref("");
-
-async function loadIteratePaths() {
-  try {
-    iteratePaths.value = await invoke("auto_iterate_paths");
-  } catch (e) {
-    iteratePaths.value = null;
-  }
-}
-
-async function copyGuide() {
-  guideText.value = `请读取 ${iteratePaths.value.guide}`;
-  const ok = await copyText(guideText.value);
-  toast(ok ? "引导语已复制" : "已生成引导语，请手动复制", ok ? "ok" : "info");
-}
-
-async function copyText(text) {
-  try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch (e) {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.style.position = "fixed";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.select();
-    let ok = false;
-    try {
-      ok = document.execCommand("copy");
-    } catch (_) {}
-    document.body.removeChild(ta);
-    return ok;
-  }
-}
-
 onMounted(async () => {
   // 进度监听放在全局：切到其他页时 RunPanel 会卸载，事件不能跟着丢
   await attachRunListener();
   await loadSettings();
-  await loadIteratePaths();
 });
 </script>
 
@@ -103,25 +63,6 @@ onMounted(async () => {
             <p class="hint px-1">
               被测模型跑出结果，评测模型拿评测提示词逐条判定。两个可以是同一个 API，也可以分开；判定要稳定时，评测模型建议用 temperature 0。
             </p>
-
-            <div class="card p-4 space-y-2">
-              <div class="flex items-start justify-between gap-4">
-                <div>
-                  <div class="text-[13px] font-medium">自动迭代脚本</div>
-                  <p class="hint mt-1 max-w-[820px]">
-                    给 Claude、Codex 这类 agent 用。脚本和说明随应用安装。把下面这句话发给 agent，剩下的它会引导你完成。
-                  </p>
-                  <p v-if="iteratePaths" class="hint mt-1 break-all">手册：{{ iteratePaths.guide }}</p>
-                  <p v-else class="hint mt-1">读取脚本路径失败，请重试或重新安装应用。</p>
-                </div>
-                <button class="btn-primary text-[12px] shrink-0" :disabled="!iteratePaths" @click="copyGuide">
-                  复制引导语
-                </button>
-              </div>
-              <textarea v-if="guideText" readonly :value="guideText" rows="3"
-                class="w-full text-[12px] bg-ink-850 border border-ink-700/60 rounded p-2 resize-none"
-                @focus="$event.target.select()"></textarea>
-            </div>
           </div>
         </template>
 
