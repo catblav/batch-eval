@@ -23,6 +23,17 @@ const HEADERS = [
 const CSV_CHUNK = 500;
 const JSON_CHUNK = 200;
 
+/// 导出文件名的时间后缀：YYYYMMDD_HHmm，避免多次导出互相覆盖
+function timeSuffix(d = new Date()) {
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}`;
+}
+
+/// 生成带时间后缀的默认文件名，如 评测结果_20261105_1656.csv
+function stampedPath(name, ext) {
+  return `${name}_${timeSuffix()}.${ext}`;
+}
+
 function esc(v) {
   const s = v === null || v === undefined ? "" : String(v);
   if (/[",\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
@@ -52,7 +63,7 @@ function rowOf(r) {
 export async function exportCsv(results) {
   try {
     const path = await save({
-      defaultPath: "评测结果.csv",
+      defaultPath: stampedPath("评测结果", "csv"),
       filters: [{ name: "CSV", extensions: ["csv"] }],
     });
     if (!path) return;
@@ -75,7 +86,7 @@ export async function exportCsv(results) {
 export async function exportJson(results, columns) {
   try {
     const path = await save({
-      defaultPath: "评测结果.json",
+      defaultPath: stampedPath("评测结果", "json"),
       filters: [{ name: "JSON", extensions: ["json"] }],
     });
     if (!path) return;
@@ -105,7 +116,7 @@ export async function exportJson(results, columns) {
 export async function exportFullReport(payload) {
   try {
     const path = await save({
-      defaultPath: "评测报告.xlsx",
+      defaultPath: stampedPath("评测报告", "xlsx"),
       filters: [{ name: "Excel 工作簿", extensions: ["xlsx"] }],
     });
     if (!path) return;
