@@ -1,384 +1,561 @@
 <script setup>
-import { ref, computed, watch } from "vue";
-import { invoke } from "@tauri-apps/api/core";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import {
   state,
-  stats,
   toast,
-  statusLabelOf,
-  ensureUserTemplate,
-  templateVarCheck,
-  resetRunResults,
-  mergeMissingResults,
-  startRunSession,
-  finishRunSession,
-  sessionReceivedCount,
-  clearRun,
+  launchJobs,
+  cancelJob,
+  deleteJob,
+  resumeJob,
+  retryJob,
+  openLive,
+  jobPassRate,
+  planById,
+  planProblems,
+  datasetMetaById,
+  connectionById,
+  liveStats,
+  isExcluded,
 } from "../store";
-import Field from "./Field.vue";
+import { ask } from "@tauri-apps/plugin-dialog";
+import Icon from "./Icon.vue";
 import Pager from "./Pager.vue";
+import DetailDrawer from "./DetailDrawer.vue";
 
-const err = ref("");
-// 取消是异步的：后端要中断在途请求并收尾落盘，这期间给个明确反馈，
-// 否则用户点完看不到变化，会以为按钮没生效（这正是之前的实际感受）
-const cancelling = ref(false);
+const now = ref(Date.now());
+let tick = null;
 
-const sel = state.settings;
-const run = state.run;
-
-const ready = computed(() => {
-  const problems = [];
-  if (!state.prompts.systemPrompt.trim()) problems.push("主体提示词为空");
-  if (!state.prompts.userTemplate.trim() && !state.dataset.columns.length) problems.push("用户消息模板为空");
-  if (!state.prompts.evalPrompt.trim()) problems.push("评测提示词为空");
-  if (!state.dataset.rows.length) problems.push("数据集为空");
-  if (!sel.target.baseUrl.trim()) problems.push("被测模型 Base URL 为空");
-  if (!sel.target.model.trim()) problems.push("被测模型名为空");
-  if (!sel.judge.baseUrl.trim()) problems.push("评测模型 Base URL 为空");
-  if (!sel.judge.model.trim()) problems.push("评测模型名为空");
-  return problems;
-});
-
-// 实时结果分页：运行中默认跟随最新一页，手动翻页后不再自动跳
-const page = ref(1);
-const pageSize = ref(50);
-const follow = ref(true);
-const pageCount = computed(() => Math.max(1, Math.ceil(run.results.length / Math.max(1, pageSize.value))));
-const pagedResults = computed(() => {
-  const size = Math.max(1, pageSize.value);
-  const p = Math.min(Math.max(1, page.value), pageCount.value);
-  const start = (p - 1) * size;
-  return run.results.slice(start, start + size);
-});
-watch(pageCount, (n) => {
-  if (follow.value) page.value = n;
-});
-watch(
-  () => run.running,
-  (v) => {
-    if (v) {
-      follow.value = true;
-    }
-  }
+const selected = computed(() => state.runForm.selectedPlanIds);
+const selectedPlans = computed(() => selected.value.map(planById).filter(Boolean));
+const runningJobs = computed(() =>
+  state.jobs.list.filter((j) => j.status === "running" || j.status === "cancelling")
 );
-function goPage(p) {
-  follow.value = false;
-  page.value = p;
-}
-function toLatest() {
-  follow.value = true;
-  page.value = pageCount.value;
-}
-function onPageSize(n) {
-  pageSize.value = n;
-  page.value = follow.value ? pageCount.value : 1;
-}
-
-// 耗时拆分：把「跑得慢」落到具体是哪一步。
-// 被测 / 评测各自取已完成行的中位数（平均值容易被个别超时行带偏），
-// 再按并发折算剩余时间，比干等进度条有信息量。
-const timing = computed(() => {
-  const list = run.results;
-  if (!list.length) return null;
-  const median = (arr) => {
-    const s = [...arr].sort((a, b) => a - b);
-    const m = Math.floor(s.length / 2);
-    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
-  };
-  const targetMs = median(list.map((r) => r.targetLatencyMs || 0));
-  const judgeMs = median(list.map((r) => r.judgeLatencyMs || 0));
-  const perRowMs = targetMs + judgeMs;
-  const conc = Math.max(1, Number(sel.concurrency) || 1);
-  const remain = Math.max(0, (run.total || state.dataset.rows.length) - run.done);
-  return {
-    targetMs,
-    judgeMs,
-    perRowMs,
-    judgeShare: perRowMs ? judgeMs / perRowMs : 0,
-    etaMs: perRowMs * Math.ceil(remain / conc),
-    conc,
-  };
-});
-
-function fmtDur(ms) {
-  const s = Math.round(ms / 1000);
-  if (s < 60) return `${s}s`;
-  return `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
-}
-
-const progress = computed(() => (run.total ? run.done / run.total : 0));
-const elapsedText = computed(() => {
-  const ms = run.elapsed || 0;
-  const s = Math.floor(ms / 1000);
-  return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
-});
-
-async function start(mode = "new", onlyIndices = null) {
-  err.value = "";
-  cancelling.value = false;
-  ensureUserTemplate();
-  if (ready.value.length) {
-    err.value = "还有没填好的地方：" + ready.value.join("、");
-    return;
-  }
-  // 模板引用了数据集里不存在的列时，运行会把 {{xxx}} 原样发给模型，先确认一次
-  const unknown = templateVarCheck.value.unknown;
-  if (unknown.length) {
-    const ok = await ask(
-      `提示词里的 ${unknown.map((v) => `{{${v}}}`).join("、")} 在数据集里没有对应列，` +
-        `运行时会把占位符原样发给模型。确定继续吗？`,
-      { title: "有未匹配的变量", kind: "warning", okLabel: "继续", cancelLabel: "返回修改" }
-    );
-    if (!ok) return;
-  }
-
-  let indices = onlyIndices;
-  if (mode === "new") {
-    resetRunResults();
-    run.runId = `run-${Date.now()}`;
-    page.value = 1;
-    follow.value = true;
-  } else if (mode === "retry") {
-    indices = run.results.filter((r) => r.targetError || !r.parseOk || !r.pass).map((r) => r.index);
-    if (!indices.length) {
-      toast("没有需要重跑的行", "info");
-      return;
-    }
-  } else if (mode === "resume") {
-    indices = Array.from({ length: state.dataset.rows.length }, (_, i) => i).filter(
-      (i) => !run.results.some((r) => r.index === i)
-    );
-    if (!indices.length) {
-      toast("没有未完成的行", "info");
-      return;
-    }
-  }
-  // 重跑 / 续跑沿用当前 runId，结果追加到同一份 results.jsonl
-  if (!run.runId) run.runId = `run-${Date.now()}`;
-
-  const labels = state.dataset.rows.map((r) => statusLabelOf(r));
-  const sessionTotal = indices ? indices.length : state.dataset.rows.length;
-  startRunSession(sessionTotal);
-
-  let status = "finished";
-  try {
-    const outcome = await invoke("start_run", {
-      cfg: {
-        systemPrompt: state.prompts.systemPrompt,
-        userTemplate: state.prompts.userTemplate,
-        evalPrompt: state.prompts.evalPrompt,
-        target: sel.target,
-        judge: sel.judge,
-        concurrency: Number(sel.concurrency) || 1,
-        maxRetries: Number(sel.maxRetries) || 0,
-        mode,
-        retryIndices: indices || null,
-        runId: run.runId,
-      },
-      rows: state.dataset.rows,
-      labels,
-    });
-
-    status = outcome?.status || "finished";
-    if (outcome?.error) {
-      err.value = outcome.error;
-      run.error = outcome.error;
-      toast(outcome.error, "err", 8000);
-    }
-
-    // 事件是异步投递的，跑得快时可能还没全部到达；这里只补界面上缺的 index，
-    // 而且要确认磁盘上就是本次运行，绝不把上一次的结果并进来
-    if (outcome && outcome.done > sessionReceivedCount()) {
-      const loaded = await invoke("load_last_run");
-      if (loaded?.meta?.runId === run.runId) mergeMissingResults(loaded.results);
-    }
-
-    if (status === "cancelled") toast("已取消，已跑完的结果已保留", "info");
-  } catch (e) {
-    status = "failed";
-    err.value = String(e);
-    run.error = String(e);
-    toast(String(e), "err");
-  } finally {
-    cancelling.value = false;
-    finishRunSession(status);
-  }
-}
-
-async function clearAll() {
-  if (run.running) return;
-  const ok = await ask(
-    `清空这次的 ${run.results.length} 条运行结果？磁盘上的结果文件也会删除，无法恢复。`,
-    { title: "清空结果", kind: "warning", okLabel: "清空", cancelLabel: "取消" }
-  );
-  if (!ok) return;
-  try {
-    await clearRun();
-    page.value = 1;
-    follow.value = true;
-    toast("已清空运行结果", "ok");
-  } catch (e) {
-    toast(String(e), "err");
-  }
-}
-
-async function cancel() {
-  if (cancelling.value) return;
-  cancelling.value = true;
-  try {
-    const found = await invoke("cancel_run", { runId: run.runId });
-    if (found) {
-      toast("正在取消，在途请求已中断", "info");
-    } else {
-      cancelling.value = false;
-      toast("没有找到正在运行的本次任务，可能已经结束了", "info");
-    }
-  } catch (e) {
-    cancelling.value = false;
-    toast(String(e), "err");
-  }
-}
-
-const canResume = computed(
-  () => run.results.length > 0 && run.results.length < state.dataset.rows.length && !run.running
+const finishedJobs = computed(() =>
+  state.jobs.list.filter((j) => !["running", "cancelling"].includes(j.status))
 );
-const failedCount = computed(
-  () => run.results.filter((r) => r.targetError || !r.parseOk || !r.pass).length
-);
-
-const statusText = computed(() => {
-  if (run.running && cancelling.value) return "正在取消…";
-  if (run.running) return "运行中…";
-  if (run.status === "cancelled") return "已取消";
-  if (run.status === "failed") return "运行失败";
-  if (run.status === "interrupted") return "上次运行被中断";
-  if (run.status === "finished") return "已完成";
+const concurrency = computed(() => Number(state.runForm.concurrency) || 1);
+const totalConcurrency = computed(() => selectedPlans.value.length * concurrency.value);
+const canLaunch = computed(() => {
+  if (!selectedPlans.value.length) return false;
+  if (selectedPlans.value.some((p) => planProblems(p).length)) return false;
+  return runningJobs.value.length + selectedPlans.value.length <= 4;
+});
+const launchHint = computed(() => {
+  if (!selectedPlans.value.length) return "勾选要运行的方案";
+  if (runningJobs.value.length + selectedPlans.value.length > 4)
+    return `最多同时运行 4 个任务，当前已有 ${runningJobs.value.length} 个`;
+  if (selectedPlans.value.some((p) => planProblems(p).length)) return "有方案还没配置完整";
   return "";
 });
+
+const live = computed(() => state.jobs.live);
+const liveOnlyFail = ref(false);
+const liveQuery = ref("");
+const livePage = ref(1);
+const livePageSize = ref(50);
+const liveFollow = ref(true);
+const detailIndex = ref(-1);
+
+const liveFiltered = computed(() => {
+  const q = liveQuery.value.trim().toLowerCase();
+  return (live.value?.results || []).filter((r) => {
+    if (liveOnlyFail.value && r.pass === true) return false;
+    if (!q) return true;
+    return `${r.index + 1}\n${r.input}\n${r.output}\n${(r.reasons || []).join(" ")}\n${r.statusLabel}`
+      .toLowerCase()
+      .includes(q);
+  });
+});
+const livePageCount = computed(() =>
+  Math.max(1, Math.ceil(liveFiltered.value.length / Math.max(1, livePageSize.value)))
+);
+const liveRows = computed(() => {
+  const size = Math.max(1, livePageSize.value);
+  const p = Math.min(Math.max(1, livePage.value), livePageCount.value);
+  return liveFiltered.value.slice((p - 1) * size, p * size);
+});
+const detailRow = computed(() => {
+  if (detailIndex.value < 0) return null;
+  return (live.value?.results || []).find((r) => r.index === detailIndex.value) || null;
+});
+const detailDataRow = computed(() => {
+  if (detailIndex.value < 0) return null;
+  return live.value?.dataset?.rows?.[detailIndex.value] || null;
+});
+
+watch(livePageCount, (n) => {
+  if (liveFollow.value) livePage.value = n;
+});
+
+watch(
+  () => live.value?.runId,
+  () => {
+    liveOnlyFail.value = false;
+    liveQuery.value = "";
+    detailIndex.value = -1;
+    livePageSize.value = 50;
+    liveFollow.value = live.value?.status === "running";
+    livePage.value = liveFollow.value ? livePageCount.value : 1;
+  }
+);
+
+watch(
+  () => [liveOnlyFail.value, liveQuery.value, livePageSize.value],
+  () => {
+    livePage.value = 1;
+  }
+);
+
+function togglePlan(p) {
+  if (planProblems(p).length) return;
+  const set = new Set(selected.value);
+  if (set.has(p.id)) set.delete(p.id);
+  else set.add(p.id);
+  state.runForm.selectedPlanIds = state.plans.filter((x) => set.has(x.id)).map((x) => x.id);
+}
+
+function selectAllRunnable() {
+  state.runForm.selectedPlanIds = state.plans
+    .filter((p) => !planProblems(p).length)
+    .map((p) => p.id);
+}
+
+function launch() {
+  const n = launchJobs();
+  if (n > 0) toast(`已启动 ${n} 个任务，各自独立运行`, "ok");
+}
+
+function statusText(s) {
+  return {
+    running: "运行中",
+    cancelling: "取消中",
+    finished: "已完成",
+    cancelled: "已取消",
+    failed: "失败",
+    interrupted: "已中断",
+  }[s] || s;
+}
+
+function statusClass(s) {
+  if (s === "running") return "text-accent border-accent/30 bg-accent/5";
+  if (s === "finished") return "text-pass border-pass/30 bg-pass/5";
+  if (s === "failed") return "text-fail border-fail/30 bg-fail/5";
+  if (s === "interrupted" || s === "cancelling") return "text-warn border-warn/30 bg-warn/5";
+  return "text-sub border-line bg-wash";
+}
+
+function progressOf(job) {
+  const total = job.total || job.summary?.total || 0;
+  const p = state.jobs.progress[job.runId];
+  let done = p?.done;
+  if (done === undefined) {
+    done = job.summary?.total || 0;
+  }
+  return { done: Math.min(done, total), total };
+}
+
+function percentOf(job) {
+  const { done, total } = progressOf(job);
+  return total ? Math.min(100, (done / total) * 100) : 0;
+}
+
+function rateText(job) {
+  const r = jobPassRate(job);
+  if (r === null || r === undefined) return "—";
+  return `${(r * 100).toFixed(r === 1 || r === 0 ? 0 : 1)}%`;
+}
+
+function fmtDuration(ms) {
+  if (!ms || ms < 0) return "—";
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m${String(s % 60).padStart(2, "0")}s`;
+  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
+}
+
+function elapsedOf(job) {
+  const end = job.finishedAt || now.value;
+  return fmtDuration(end - (job.startedAt || end));
+}
+
+function modelsOf(job) {
+  const target = job.targetProfile?.model || connectionById(planById(job.planId)?.targetId)?.model || "—";
+  const judge = job.judgeProfile?.model || connectionById(planById(job.planId)?.judgeId)?.model || "—";
+  return `${target} → ${judge}`;
+}
+
+async function view(job) {
+  detailIndex.value = -1;
+  await openLive(job.runId);
+}
+
+async function stop(job) {
+  try {
+    await cancelJob(job.runId);
+  } catch (e) {
+    toast("取消失败：" + e, "err");
+  }
+}
+
+async function resume(job) {
+  try {
+    await resumeJob(job);
+  } catch (e) {
+    toast("续跑失败：" + e, "err", 8000);
+  }
+}
+
+async function retry(job) {
+  try {
+    await retryJob(job);
+  } catch (e) {
+    toast("重跑失败：" + e, "err", 8000);
+  }
+}
+
+async function remove(job) {
+  const ok = await ask(`删除任务「${job.title || job.planName}」？\n\n它的结果文件和数据集快照会一起删除，无法恢复。`, {
+    title: "删除任务",
+    kind: "warning",
+    okLabel: "删除",
+    cancelLabel: "取消",
+  });
+  if (!ok) return;
+  try {
+    await deleteJob(job);
+  } catch (e) {
+    toast("删除失败：" + e, "err");
+  }
+}
+
+function closeLive() {
+  state.jobs.live = null;
+  detailIndex.value = -1;
+}
+
+function openDetail(r) {
+  detailIndex.value = r.index;
+}
+
+onMounted(() => {
+  tick = setInterval(() => (now.value = Date.now()), 1000);
+});
+onBeforeUnmount(() => clearInterval(tick));
 </script>
 
 <template>
-  <div class="space-y-4">
-    <div class="card p-4">
-      <div class="flex items-center gap-2 mb-3">
-        <span class="text-[13px] font-semibold">运行参数</span>
+  <div class="h-full flex flex-col bg-page">
+    <div class="h-14 px-5 flex items-center gap-2 shrink-0 bg-page">
+      <h1 class="text-[15px] font-semibold">运行</h1>
+      <span class="text-[12px] text-weak tabular-nums">
+        {{ runningJobs.length ? `${runningJobs.length} 个进行中` : "没有进行中的任务" }}
+      </span>
+      <span class="flex-1" />
+      <button class="btn btn-sm" :class="{ 'bg-wash border-weak/40': state.runForm.launchOpen }"
+        @click="state.runForm.launchOpen = !state.runForm.launchOpen">
+        <Icon :name="state.runForm.launchOpen ? 'close' : 'plus'" :size="14" />
+        {{ state.runForm.launchOpen ? "收起" : "新建任务" }}
+      </button>
+    </div>
+
+    <!-- 启动面板 -->
+    <div v-if="state.runForm.launchOpen" class="shrink-0 border-y border-line bg-panel">
+      <div class="px-5 py-3 border-b border-line flex items-center gap-2">
+        <span class="text-[13px] font-medium">选择方案</span>
+        <span class="hint">每个方案启动一个独立任务，各自使用自己的数据集和连接</span>
         <span class="flex-1" />
-        <span class="hint">并发太高容易被限流，4~8 比较稳</span>
+        <button class="btn-ghost btn-sm" @click="selectAllRunnable">全选可运行</button>
+        <button class="btn-ghost btn-sm" :disabled="!selected.length" @click="state.runForm.selectedPlanIds = []">
+          清空
+        </button>
       </div>
-      <div class="grid grid-cols-4 gap-3">
-        <Field label="并发数" v-model="sel.concurrency" type="number" />
-        <Field label="失败重试次数" v-model="sel.maxRetries" type="number" />
-        <div class="col-span-2 flex items-end gap-2">
-          <div class="flex-1">
-            <span class="label">数据量</span>
-            <div class="field text-ink-400">{{ state.dataset.rows.length }} 条 · 每条调用被测模型 1 次 + 评测模型 1 次</div>
-          </div>
+
+      <div class="max-h-[240px] overflow-y-auto">
+        <div v-if="!state.plans.length" class="px-5 py-8 text-center hint">
+          还没有方案，先去方案页新建一个。
         </div>
+        <label
+          v-for="p in state.plans"
+          :key="p.id"
+          class="flex items-center gap-3 px-5 h-11 border-b border-line/70 cursor-pointer"
+          :class="planProblems(p).length ? 'opacity-60 cursor-not-allowed' : 'hover:bg-wash/70'"
+        >
+          <input
+            type="checkbox"
+            class="w-3.5 h-3.5"
+            :checked="selected.includes(p.id)"
+            :disabled="planProblems(p).length > 0"
+            @change="togglePlan(p)"
+          />
+          <span class="w-[150px] shrink-0 text-[13px] font-medium truncate">{{ p.name }}</span>
+          <span class="w-[170px] shrink-0 text-[12px] text-sub truncate">
+            {{ datasetMetaById(p.datasetId)?.name || "未选数据集" }}
+          </span>
+          <span class="flex-1 min-w-0 text-[12px] text-weak truncate">
+            {{ connectionById(p.targetId)?.model || "未选被测" }}
+            →
+            {{ connectionById(p.judgeId)?.model || "未选评测" }}
+          </span>
+          <span v-if="planProblems(p).length" class="text-[11.5px] text-warn text-right max-w-[260px] truncate"
+            :title="planProblems(p).join('、')">
+            {{ planProblems(p).join("、") }}
+          </span>
+          <span v-else class="text-[11.5px] text-weak shrink-0 tabular-nums">
+            {{ datasetMetaById(p.datasetId)?.rows?.toLocaleString() || 0 }} 行
+          </span>
+        </label>
+      </div>
+
+      <div class="px-5 py-3 flex items-end gap-3 flex-wrap">
+        <div>
+          <label class="label">名称前缀</label>
+          <input v-model="state.runForm.titlePrefix" class="field w-[220px]"
+            placeholder="留空为「方案名 · 日期」" />
+        </div>
+        <div>
+          <label class="label">并发</label>
+          <input v-model.number="state.runForm.concurrency" type="number" min="1" max="32"
+            class="field w-16 tabular-nums" />
+        </div>
+        <div>
+          <label class="label">失败重试</label>
+          <input v-model.number="state.runForm.maxRetries" type="number" min="0" max="10"
+            class="field w-16 tabular-nums" />
+        </div>
+        <div class="pb-1.5 text-[12px]">
+          <span :class="totalConcurrency > 8 ? 'text-warn' : 'text-sub'">
+            {{ selectedPlans.length }} 个任务 × {{ concurrency }} 并发 = {{ totalConcurrency }} 路并发
+          </span>
+          <span v-if="totalConcurrency > 8" class="text-weak"> · 容易被上游限流</span>
+        </div>
+        <span class="flex-1" />
+        <span v-if="launchHint" class="pb-2 text-[11.5px] text-warn">{{ launchHint }}</span>
+        <button class="btn-primary" :disabled="!canLaunch" @click="launch">
+          <Icon name="play" :size="14" />
+          启动 {{ selectedPlans.length || "" }}
+        </button>
       </div>
     </div>
 
-    <div class="card p-4">
-      <div class="flex items-center gap-2 mb-3">
-        <span class="text-[13px] font-semibold">进度</span>
-        <span class="flex-1" />
-        <span class="hint">已用 {{ elapsedText }}</span>
+    <div class="flex-1 min-h-0 flex flex-col">
+      <div class="flex-1 min-h-0 overflow-auto" :class="{ 'max-h-[46%] shrink-0': live }">
+        <div v-if="!state.jobs.list.length" class="h-full flex flex-col items-center justify-center gap-2">
+          <p class="text-[13px] text-sub">还没有任务</p>
+          <p class="hint">勾选一个或多个方案，同时跑多组互不影响的评测。</p>
+          <button class="btn-primary mt-2" @click="state.runForm.launchOpen = true">新建任务</button>
+        </div>
+
+        <template v-else>
+          <div v-if="runningJobs.length">
+            <div class="px-5 pt-3 pb-1.5 text-[12px] text-sub">运行中 · {{ runningJobs.length }}</div>
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th class="w-[22%]">方案</th>
+                  <th class="w-[15%]">数据集</th>
+                  <th class="w-[19%]">被测 → 评测</th>
+                  <th class="w-[17%]">进度</th>
+                  <th class="w-14 text-right">通过率</th>
+                  <th class="w-16 text-right">耗时</th>
+                  <th class="w-[104px]" />
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="j in runningJobs" :key="j.runId" @click="view(j)">
+                  <td>
+                    <div class="flex items-center gap-1.5 min-w-0">
+                      <span class="font-medium truncate">{{ j.planName || j.title }}</span>
+                      <span class="chip !h-5 !px-1.5 shrink-0" :class="statusClass(j.status)">
+                        {{ statusText(j.status) }}
+                      </span>
+                    </div>
+                  </td>
+                  <td class="text-sub truncate">{{ j.datasetName || "—" }}</td>
+                  <td class="text-weak truncate">{{ modelsOf(j) }}</td>
+                  <td>
+                    <div class="flex items-center gap-2">
+                      <div class="flex-1 h-1.5 rounded-full bg-line overflow-hidden min-w-[48px]">
+                        <div class="h-full bg-accent transition-all"
+                          :style="{ width: percentOf(j).toFixed(1) + '%' }" />
+                      </div>
+                      <span class="text-[11.5px] text-sub tabular-nums shrink-0">
+                        {{ progressOf(j).done }}/{{ progressOf(j).total }}
+                      </span>
+                    </div>
+                  </td>
+                  <td class="text-right tabular-nums">{{ rateText(j) }}</td>
+                  <td class="text-right text-sub tabular-nums">{{ elapsedOf(j) }}</td>
+                  <td>
+                    <div class="flex items-center justify-end gap-0.5" @click.stop>
+                      <button class="icon-btn" title="查看实时" @click="view(j)">
+                        <Icon name="eye" :size="15" />
+                      </button>
+                      <button v-if="j.status === 'running'" class="icon-btn text-fail" title="取消任务"
+                        @click="stop(j)">
+                        <Icon name="stop" :size="14" />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div>
+            <div class="px-5 pt-4 pb-1.5 text-[12px] text-sub">
+              已完成 · {{ finishedJobs.length }}
+              <span v-if="!finishedJobs.length" class="text-weak font-normal">（完成任务后出现在这里）</span>
+            </div>
+            <table v-if="finishedJobs.length" class="data-table">
+              <thead>
+                <tr>
+                  <th class="w-[22%]">方案</th>
+                  <th class="w-[15%]">数据集</th>
+                  <th class="w-[17%]">被测 → 评测</th>
+                  <th class="w-16 text-right">通过率</th>
+                  <th class="w-[104px] text-right">通过 / 失败</th>
+                  <th class="w-16 text-right">耗时</th>
+                  <th class="w-[132px]" />
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="j in finishedJobs" :key="j.runId" @click="view(j)">
+                  <td>
+                    <div class="flex items-center gap-1.5 min-w-0">
+                      <span class="font-medium truncate">{{ j.title || j.planName }}</span>
+                      <span class="chip !h-5 !px-1.5 shrink-0" :class="statusClass(j.status)">
+                        {{ statusText(j.status) }}
+                      </span>
+                    </div>
+                    <div class="text-[11px] text-weak truncate">{{ j.planName }}</div>
+                  </td>
+                  <td class="text-sub truncate">{{ j.datasetName || "—" }}</td>
+                  <td class="text-weak truncate">{{ modelsOf(j) }}</td>
+                  <td class="text-right tabular-nums font-medium">{{ rateText(j) }}</td>
+                  <td class="text-right text-[12px] tabular-nums whitespace-nowrap">
+                    <span class="text-pass">{{ j.summary?.passed ?? 0 }}</span>
+                    <span class="text-weak"> / </span>
+                    <span class="text-fail">{{ j.summary?.failed ?? 0 }}</span>
+                    <span v-if="j.summary?.excluded" class="text-warn"> · {{ j.summary.excluded }} 未计入</span>
+                  </td>
+                  <td class="text-right text-sub tabular-nums">{{ elapsedOf(j) }}</td>
+                  <td>
+                    <div class="flex items-center justify-end gap-0.5" @click.stop>
+                      <button class="icon-btn" title="查看结果" @click="view(j)">
+                        <Icon name="eye" :size="15" />
+                      </button>
+                      <button v-if="['interrupted', 'cancelled', 'failed'].includes(j.status)"
+                        class="icon-btn" title="断点续跑" @click="resume(j)">
+                        <Icon name="play" :size="13" />
+                      </button>
+                      <button v-if="j.summary?.failed || j.summary?.excluded" class="icon-btn"
+                        title="重跑失败项" @click="retry(j)">
+                        <Icon name="refresh" :size="14" />
+                      </button>
+                      <button class="icon-btn text-fail" title="删除任务" @click="remove(j)">
+                        <Icon name="trash" :size="14" />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </template>
       </div>
 
-      <div class="h-2 rounded-full bg-ink-800 overflow-hidden">
-        <div class="h-full bg-accent transition-all duration-300" :style="{ width: (progress * 100).toFixed(1) + '%' }" />
-      </div>
-      <div v-if="timing" class="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2 text-[12px] text-ink-400">
-        <span>
-          单条耗时（中位）：被测 {{ (timing.targetMs / 1000).toFixed(1) }}s + 评测
-          {{ (timing.judgeMs / 1000).toFixed(1) }}s = {{ (timing.perRowMs / 1000).toFixed(1) }}s
-        </span>
-        <span v-if="timing.judgeShare > 0.5" class="text-warn">
-          评测模型占 {{ Math.round(timing.judgeShare * 100) }}%
-        </span>
-        <span class="flex-1" />
-        <span v-if="run.running" class="hint">并发 {{ timing.conc }} · 预计还需 {{ fmtDur(timing.etaMs) }}</span>
-      </div>
+      <!-- 实时明细 -->
+      <div v-if="live" class="flex-1 min-h-0 flex flex-col border-t border-line bg-panel">
+        <div class="h-11 px-4 flex items-center gap-2 border-b border-line shrink-0">
+          <span class="text-[13px] font-medium truncate">{{ live.title || live.planName || "任务明细" }}</span>
+          <span class="chip !h-5 !px-1.5" :class="statusClass(live.status)">{{ statusText(live.status) }}</span>
+          <span class="text-[11.5px] text-weak truncate">
+            {{ live.planName }}<span v-if="live.datasetName"> · {{ live.datasetName }}</span>
+          </span>
+          <span class="flex-1" />
+          <span class="text-[11.5px] text-sub tabular-nums">
+            {{ live.done }} / {{ live.total || "—" }}
+          </span>
+          <span class="text-[11.5px] text-pass tabular-nums">通过 {{ liveStats.passed }}</span>
+          <span class="text-[11.5px] text-fail tabular-nums">失败 {{ liveStats.failed }}</span>
+          <span v-if="liveStats.excluded" class="text-[11.5px] text-warn tabular-nums">未计 {{ liveStats.excluded }}</span>
+          <span class="text-[11.5px] text-main tabular-nums">
+            通过率 {{ liveStats.valid ? ((liveStats.passed / liveStats.valid) * 100).toFixed(1) + "%" : "—" }}
+          </span>
+          <button class="icon-btn" title="关闭明细" @click="closeLive">
+            <Icon name="close" :size="15" />
+          </button>
+        </div>
 
-      <div class="flex items-center gap-3 mt-2 text-[12px] text-ink-400">
-        <span>{{ run.done }} / {{ run.total || state.dataset.rows.length }}</span>
-        <span v-if="run.results.length">
-          通过 {{ stats.passed }} · 不通过 {{ stats.failed }}<span v-if="stats.excluded"> · 未计入 {{ stats.excluded }}</span>
-        </span>
-        <span class="flex-1" />
-        <span v-if="statusText" :class="run.running ? 'text-accent' : run.status === 'failed' ? 'text-fail' : 'text-ink-400'">
-          {{ statusText }}
-        </span>
-      </div>
+        <div v-if="live.error" class="shrink-0 px-4 py-1.5 text-[12px] text-fail bg-fail/5 border-b border-line truncate"
+          :title="live.error">
+          {{ live.error }}
+        </div>
 
-      <div class="flex gap-2 mt-4">
-        <button class="btn-primary" :disabled="run.running" @click="start('new')">开始批量评测</button>
-        <button v-if="run.running" class="btn-danger" :disabled="cancelling" @click="cancel">
-          {{ cancelling ? "取消中…" : "取消" }}
-        </button>
-        <button class="btn" :disabled="run.running || !canResume" @click="start('resume')">断点续跑</button>
-        <button class="btn" :disabled="run.running || !failedCount" @click="start('retry')">
-          重跑未通过项（{{ failedCount }}）
-        </button>
-        <span class="flex-1" />
-        <button class="btn-ghost" :disabled="run.running || !run.results.length" @click="clearAll">
-          清空结果
-        </button>
-      </div>
+        <div class="h-9 px-4 flex items-center gap-3 border-b border-line shrink-0">
+          <label class="flex items-center gap-1.5 text-[12px] text-sub cursor-pointer">
+            <input v-model="liveOnlyFail" type="checkbox" class="w-3.5 h-3.5" />
+            只看未通过
+          </label>
+          <div class="relative">
+            <Icon name="search" :size="13"
+              class="absolute left-2 top-1/2 -translate-y-1/2 text-weak pointer-events-none" />
+            <input v-model="liveQuery" class="field pl-7 !h-7 w-48" placeholder="搜索输出或原因" />
+          </div>
+          <span class="text-[11.5px] text-weak tabular-nums">{{ liveFiltered.length }} 条</span>
+          <span class="flex-1" />
+          <button v-if="live.status === 'running' && !liveFollow" class="btn-ghost btn-sm"
+            @click="liveFollow = true; livePage = livePageCount">
+            回到最新
+          </button>
+        </div>
 
-      <div v-if="err" class="mt-3 text-[12px] text-fail bg-fail/10 border border-fail/30 rounded px-3 py-2 whitespace-pre-wrap">
-        {{ err }}
-      </div>
-      <div v-else-if="run.error"
-        class="mt-3 text-[12px] text-fail bg-fail/10 border border-fail/30 rounded px-3 py-2 whitespace-pre-wrap">
-        <span class="font-semibold">本次运行没有跑通：</span>{{ run.error }}
-      </div>
-      <div v-if="ready.length" class="mt-3 hint">
-        待补齐：{{ ready.join("、") }}
+        <div class="flex-1 min-h-0 overflow-auto">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th class="w-12 text-right pr-3">#</th>
+                <th class="w-20">结果</th>
+                <th class="w-28">分组</th>
+                <th class="w-[28%]">分类</th>
+                <th>原因</th>
+                <th class="w-16 text-right">用时</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="r in liveRows" :key="r.index" :class="{ 'row-active': detailIndex === r.index }"
+                @click="openDetail(r)">
+                <td class="text-right pr-3 text-weak tabular-nums">{{ r.index + 1 }}</td>
+                <td>
+                  <span v-if="isExcluded(r)" class="chip !h-5 !px-1.5 text-warn border-warn/30 bg-warn/5">未计入</span>
+                  <span v-else-if="r.pass === true" class="chip !h-5 !px-1.5 text-pass border-pass/30 bg-pass/5">通过</span>
+                  <span v-else class="chip !h-5 !px-1.5 text-fail border-fail/30 bg-fail/5">不通过</span>
+                </td>
+                <td class="text-sub truncate">{{ r.statusLabel }}</td>
+                <td>
+                  <span v-for="t in r.errorTypes || []" :key="t" class="chip !h-5 !px-1.5 mr-1">{{ t }}</span>
+                </td>
+                <td class="text-sub truncate max-w-[360px]">{{ (r.reasons || []).join("；") }}</td>
+                <td class="text-right text-sub tabular-nums">
+                  {{ (((r.targetLatencyMs || 0) + (r.judgeLatencyMs || 0)) / 1000).toFixed(1) }}s
+                </td>
+              </tr>
+              <tr v-if="!liveFiltered.length">
+                <td colspan="6" class="text-center text-weak py-8">
+                  {{ live.loading ? "读取中…" : live.status === "running" ? "等待结果…" : "没有结果" }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <Pager :total="liveFiltered.length" :page="livePage" :page-size="livePageSize"
+          @update:page="liveFollow = false; livePage = $event"
+          @update:page-size="livePageSize = $event; liveFollow = false" />
       </div>
     </div>
 
-    <div class="card overflow-hidden">
-      <div class="flex items-center gap-2 px-4 py-2 border-b border-ink-700/60">
-        <span class="text-[13px] font-semibold">实时结果</span>
-        <span v-if="run.results.length" class="hint">共 {{ run.results.length }} 条</span>
-        <span class="flex-1" />
-        <button v-if="run.running && !follow" class="btn-ghost text-[12px]" @click="toLatest">回到最新</button>
-      </div>
-      <div class="overflow-auto max-h-[340px]">
-        <table class="w-full text-[12px]">
-          <thead class="sticky top-0 bg-ink-850 text-ink-400">
-            <tr>
-              <th class="px-3 py-2 text-left font-medium w-12">#</th>
-              <th class="px-3 py-2 text-left font-medium w-24">状态</th>
-              <th class="px-3 py-2 text-left font-medium w-28">分组</th>
-              <th class="px-3 py-2 text-left font-medium">分类</th>
-              <th class="px-3 py-2 text-left font-medium">原因</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="r in pagedResults" :key="r.index"
-              class="border-t border-ink-800 hover:bg-ink-850/60">
-              <td class="px-3 py-1.5 text-ink-500">{{ r.index + 1 }}</td>
-              <td class="px-3 py-1.5">
-                <span class="chip" :class="r.pass === true ? 'border-pass/40 text-pass bg-pass/10' : 'border-fail/40 text-fail bg-fail/10'">
-                  {{ r.pass === true ? "通过" : "不通过" }}
-                </span>
-              </td>
-              <td class="px-3 py-1.5 text-ink-400">{{ r.statusLabel }}</td>
-              <td class="px-3 py-1.5">
-                <span v-for="t in r.errorTypes" :key="t" class="chip border-ink-700 text-ink-300 mr-1">{{ t }}</span>
-              </td>
-              <td class="px-3 py-1.5 text-ink-400 truncate max-w-[420px]">{{ (r.reasons || []).join("；") }}</td>
-            </tr>
-            <tr v-if="!run.results.length">
-              <td colspan="5" class="px-3 py-10 text-center text-ink-500">还没开始跑</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <Pager :total="run.results.length" :page="page" :page-size="pageSize"
-        @update:page="goPage" @update:page-size="onPageSize" />
-    </div>
+    <DetailDrawer :row="detailRow" :data-row="detailDataRow" @close="detailIndex = -1" />
   </div>
 </template>

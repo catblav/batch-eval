@@ -1,6 +1,6 @@
 use crate::api::{self, ApiProfile};
 use crate::judge;
-use crate::run_store::{self, RunMeta};
+use crate::run_store::{self, PromptSnapshot, RunMeta, RunSummary};
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -14,24 +14,57 @@ use tauri::{AppHandle, Emitter, Manager};
 /// 取消后不再重试，run_one 看到这个错误直接丢弃该行（不算调用失败）
 const CANCELLED: &str = "__cancelled__";
 
+/// 同时最多运行几个任务，超出直接拒绝启动
+pub const MAX_ACTIVE_RUNS: usize = 4;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunConfig {
-    /// 主体提示词（被测模型的 system prompt）
-    pub system_prompt: String,
-    /// 用户消息模板，可含 {{列名}} 变量
-    pub user_template: String,
-    /// 评测提示词，可含 {{input}} {{output}} 与列名变量
-    pub eval_prompt: String,
+    pub run_id: String,
+    /// 任务名称，默认「方案名 · 日期」；可以为空
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub plan_id: String,
+    #[serde(default)]
+    pub plan_name: String,
+    /// 方案三份提示词的快照
+    pub prompts: PromptSnapshot,
+    /// 从数据集库按 id 读取，IPC 不再传整份数据
+    pub dataset_id: String,
+    #[serde(default)]
+    pub dataset_name: String,
     pub target: ApiProfile,
     pub judge: ApiProfile,
     pub concurrency: usize,
     pub max_retries: u32,
-    /// newRun = 全部重跑；retryFailed = 只重跑上一次失败的行；resume = 从断点续跑
+    /// newRun = 新任务；retryFailed = 只重跑失败行；resume = 从断点续跑
     pub mode: String,
     /// 需要重跑的行下标（retryFailed / resume 时由前端传入）
     pub retry_indices: Option<Vec<usize>>,
-    pub run_id: String,
+}
+
+/// 分组标签的取值优先级，必须与前端 statusLabelOf 一致。
+pub fn status_label_of(row: &Map<String, Value>) -> String {
+    fn text(v: &Value) -> String {
+        match v {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        }
+    }
+    if let Some(v) = row.get("数据组状态") {
+        let s = text(v);
+        return if s.is_empty() { "未分组".into() } else { s };
+    }
+    for k in ["状态", "分组", "类别", "status", "group", "case"] {
+        if let Some(v) = row.get(k) {
+            let s = text(v);
+            if !s.trim().is_empty() {
+                return s;
+            }
+        }
+    }
+    "未分组".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,30 +104,102 @@ pub struct RunOutcome {
     pub error: Option<String>,
 }
 
+/// 连接身份：同一条连接上的多个任务共享 429 退避，不互相打爆配额。
+/// 用协议 + 地址 + Key 的哈希做 key，Key 不落到日志。
+fn connection_key(p: &ApiProfile) -> String {
+    const OFFSET: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+    let mut h = OFFSET;
+    for b in p
+        .protocol
+        .bytes()
+        .chain(b"|".iter().copied())
+        .chain(p.base_url.bytes())
+        .chain(b"|".iter().copied())
+        .chain(p.api_key.bytes())
+    {
+        h ^= b as u64;
+        h = h.wrapping_mul(PRIME);
+    }
+    format!("conn-{h:016x}")
+}
+
+/// 应用级闸门表：按连接身份共享「等到某时刻再发请求」。
 #[derive(Default)]
+pub struct GateRegistry {
+    gates: Mutex<HashMap<String, Arc<AtomicU64>>>,
+}
+
+impl GateRegistry {
+    pub fn gate_for(&self, p: &ApiProfile) -> Arc<AtomicU64> {
+        let key = connection_key(p);
+        if let Ok(mut map) = self.gates.lock() {
+            return map
+                .entry(key)
+                .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+                .clone();
+        }
+        Arc::new(AtomicU64::new(0))
+    }
+}
+
+/// 运行中任务表：run_id -> 取消标记。
+/// try_register 返回 RAII guard，任何提前返回都会释放占位。
+#[derive(Default, Clone)]
 pub struct RunRegistry {
-    /// run_id -> 取消标记
     flags: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
 }
 
+pub struct RunLease {
+    flags: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    id: String,
+    flag: Arc<AtomicBool>,
+}
+
+impl RunLease {
+    pub fn flag(&self) -> Arc<AtomicBool> {
+        self.flag.clone()
+    }
+}
+
+impl Drop for RunLease {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.flags.lock() {
+            // 只移除自己那一条，避免误删同名的新任务
+            if let Some(cur) = map.get(&self.id) {
+                if Arc::ptr_eq(cur, &self.flag) {
+                    map.remove(&self.id);
+                }
+            }
+        }
+    }
+}
+
 impl RunRegistry {
-    fn register(&self, id: &str) -> Arc<AtomicBool> {
+    pub fn try_register(&self, id: &str) -> Result<RunLease, String> {
+        let mut map = self
+            .flags
+            .lock()
+            .map_err(|_| "运行状态锁已损坏".to_string())?;
+        if map.contains_key(id) {
+            return Err("同名任务已经在运行".into());
+        }
+        if map.len() >= MAX_ACTIVE_RUNS {
+            return Err(format!(
+                "同时最多运行 {MAX_ACTIVE_RUNS} 个任务，请先等一个任务结束"
+            ));
+        }
         let flag = Arc::new(AtomicBool::new(false));
-        if let Ok(mut map) = self.flags.lock() {
-            map.insert(id.to_string(), flag.clone());
-        }
-        flag
+        map.insert(id.to_string(), flag.clone());
+        Ok(RunLease {
+            flags: self.flags.clone(),
+            id: id.to_string(),
+            flag,
+        })
     }
 
-    fn remove(&self, id: &str) {
-        if let Ok(mut map) = self.flags.lock() {
-            map.remove(id);
-        }
-    }
-
-    /// 返回是否真的找到了这次运行：找不到说明它已经结束了，
-    /// 前端据此提示用户，而不是无脑弹「已取消」。
-    fn cancel(&self, id: &str) -> bool {
+    /// 返回是否真的找到了这个任务：找不到说明它已经结束了。
+    pub fn cancel(&self, id: &str) -> bool {
         if let Ok(map) = self.flags.lock() {
             if let Some(flag) = map.get(id) {
                 flag.store(true, Ordering::SeqCst);
@@ -103,6 +208,7 @@ impl RunRegistry {
         }
         false
     }
+
 }
 
 fn render(template: &str, row: &Map<String, Value>, input: &str, output: &str) -> String {
@@ -252,15 +358,16 @@ async fn run_one(
     judge_client: &reqwest::Client,
     status_label: &str,
     flag: &AtomicBool,
-    gate: &AtomicU64,
+    target_gate: &AtomicU64,
+    judge_gate: &AtomicU64,
 ) -> Option<RowResult> {
     if flag.load(Ordering::SeqCst) {
         return None;
     }
-    let user_msg = render(&cfg.user_template, row, "", "");
+    let user_msg = render(&cfg.prompts.user_template, row, "", "");
     // 系统提示词与用户消息同样按行渲染：两者都可能引用数据集列，
     // 不渲染会把 {{列名}} 字面量发给模型。
-    let system_prompt = render(&cfg.system_prompt, row, "", "");
+    let system_prompt = render(&cfg.prompts.system_prompt, row, "", "");
     let mut res = RowResult {
         index: idx,
         input: user_msg.clone(),
@@ -289,7 +396,7 @@ async fn run_one(
         &user_msg,
         cfg.max_retries,
         flag,
-        gate,
+        target_gate,
     )
     .await
     {
@@ -316,7 +423,7 @@ async fn run_one(
     }
 
     let input_for_judge = judge_input_text(&system_prompt, &user_msg);
-    let judge_input = render(&cfg.eval_prompt, row, &input_for_judge, &res.output);
+    let judge_input = render(&cfg.prompts.eval_prompt, row, &input_for_judge, &res.output);
     match call_with_retry(
         judge_client,
         &cfg.judge,
@@ -324,7 +431,7 @@ async fn run_one(
         &judge_input,
         cfg.max_retries,
         flag,
-        gate,
+        judge_gate,
     )
     .await
     {
@@ -367,6 +474,7 @@ fn hard_error_of(r: &RowResult) -> Option<String> {
 /// 进度缓冲：按 10 条或 250ms 合并发事件，同时把每条结果追加进 results.jsonl。
 struct Sink {
     app: AppHandle,
+    run_id: String,
     writer: std::io::BufWriter<std::fs::File>,
     buf: Vec<RowResult>,
     last_emit: Instant,
@@ -412,7 +520,12 @@ impl Sink {
         if let Some(results) = self.take_batch() {
             let _ = self.app.emit(
                 "run://progress",
-                json!({ "done": self.done, "total": self.total, "results": results }),
+                json!({
+                    "runId": self.run_id,
+                    "done": self.done,
+                    "total": self.total,
+                    "results": results
+                }),
             );
         }
     }
@@ -463,7 +576,8 @@ pub(crate) async fn run_one_for_test(
     let target_client = crate::api::build_client(&cfg.target).ok()?;
     let judge_client = crate::api::build_client(&cfg.judge).ok()?;
     let flag = AtomicBool::new(false);
-    let gate = AtomicU64::new(0);
+    let target_gate = AtomicU64::new(0);
+    let judge_gate = AtomicU64::new(0);
     run_one(
         cfg,
         0,
@@ -472,69 +586,133 @@ pub(crate) async fn run_one_for_test(
         &judge_client,
         "测试",
         &flag,
-        &gate,
+        &target_gate,
+        &judge_gate,
     )
     .await
 }
 
 #[tauri::command]
-pub async fn start_run(
-    app: AppHandle,
-    cfg: RunConfig,
-    rows: Vec<Map<String, Value>>,
-    labels: Vec<String>,
-) -> Result<RunOutcome, String> {
+pub async fn start_run(app: AppHandle, cfg: RunConfig) -> Result<RunOutcome, String> {
     if cfg.target.base_url.trim().is_empty() || cfg.target.model.trim().is_empty() {
-        return Err("被测模型的 Base URL 与模型名不能为空".into());
+        return Err("被测连接的 Base URL 与模型名不能为空".into());
     }
     if cfg.judge.base_url.trim().is_empty() || cfg.judge.model.trim().is_empty() {
-        return Err("评测模型的 Base URL 与模型名不能为空".into());
+        return Err("评测连接的 Base URL 与模型名不能为空".into());
     }
-    if cfg.eval_prompt.trim().is_empty() {
+    if cfg.prompts.eval_prompt.trim().is_empty() {
         return Err("评测提示词不能为空".into());
     }
-    if rows.is_empty() {
-        return Err("数据集为空".into());
+    if cfg.dataset_id.trim().is_empty() {
+        return Err("没有选择数据集".into());
     }
 
-    let flag = app.state::<RunRegistry>().register(&cfg.run_id);
+    // 数据集由后端按 id 读取，IPC 不再传整份数据
+    let ds = crate::storage::load_dataset_by_id(&app, &cfg.dataset_id)?;
+    if ds.rows.is_empty() {
+        return Err("数据集为空".into());
+    }
+    let signature = crate::storage::dataset_signature(&ds);
+    let rows = ds.rows;
+    let labels: Vec<String> = rows.iter().map(status_label_of).collect();
+
+    // try_register 的 guard 在任何提前返回时自动释放占位
+    let lease = app.state::<RunRegistry>().try_register(&cfg.run_id)?;
+    let flag = lease.flag();
     let target_client = api::build_client(&cfg.target)?;
     let judge_client = api::build_client(&cfg.judge)?;
     let concurrency = cfg.concurrency.clamp(1, 32);
+
+    let dir = run_store::run_dir(&app, &cfg.run_id)?;
+    let mut meta = if cfg.mode == "new" {
+        if dir.exists() {
+            return Err("同名任务目录已存在，请重新创建任务".into());
+        }
+        RunMeta {
+            run_id: cfg.run_id.clone(),
+            title: cfg.title.clone(),
+            plan_id: String::new(),
+            plan_name: String::new(),
+            dataset_id: String::new(),
+            dataset_name: String::new(),
+            prompts: PromptSnapshot::default(),
+            dataset_signature: String::new(),
+            total: rows.len(),
+            started_at: run_store::now_ms(),
+            finished_at: None,
+            status: run_store::STATUS_RUNNING.into(),
+            error: None,
+            summary: None,
+            target_profile: None,
+            judge_profile: None,
+        }
+    } else {
+        let m = run_store::read_meta(&dir)?
+            .ok_or_else(|| "任务不存在，无法续跑或重跑".to_string())?;
+        if m.status == run_store::STATUS_RUNNING {
+            return Err("任务正在运行，不能重复启动".into());
+        }
+        m
+    };
+
+    if cfg.mode != "new" {
+        // 数据集被替换后继续跑，会把新旧数据混在同一份结果里
+        if !meta.dataset_signature.is_empty() && meta.dataset_signature != signature {
+            return Err("数据集已被替换，续跑或重跑会把新旧数据混在一起。请新建任务。".into());
+        }
+        // 方案提示词改过再重跑失败项，旧结果和新判定口径不一致
+        if cfg.mode == "retry" && meta.prompts != cfg.prompts {
+            return Err("方案提示词已修改，重跑失败项会和旧结果混在一起。请新建任务。".into());
+        }
+    }
+
+    meta.run_id = cfg.run_id.clone();
+    meta.title = cfg.title.clone();
+    meta.plan_id = cfg.plan_id.clone();
+    meta.plan_name = cfg.plan_name.clone();
+    meta.dataset_id = cfg.dataset_id.clone();
+    meta.dataset_name = cfg.dataset_name.clone();
+    meta.prompts = cfg.prompts.clone();
+    meta.dataset_signature = signature;
+    meta.total = rows.len();
+    meta.status = run_store::STATUS_RUNNING.into();
+    meta.finished_at = None;
+    meta.error = None;
+    // 只留能进报告的部分，API Key 和接口地址不落盘
+    meta.target_profile = Some(run_store::profile_snapshot(&cfg.target));
+    meta.judge_profile = Some(run_store::profile_snapshot(&cfg.judge));
+
+    if cfg.mode == "new" {
+        meta.started_at = run_store::now_ms();
+        meta.summary = None;
+        run_store::reset(&dir, &meta)?;
+    } else {
+        run_store::write_meta(&dir, &meta)?;
+    }
+    // 原始数据行跟着任务落盘，之后替换数据集库也不影响这次任务
+    if let Err(e) = run_store::write_dataset(&dir, &run_store::DatasetSnapshot { rows: rows.clone() }) {
+        eprintln!("保存原始数据快照失败：{e}");
+    }
+    let writer = run_store::open_append(&dir)?;
 
     let indices: Vec<usize> = match &cfg.retry_indices {
         Some(list) if !list.is_empty() => list.iter().copied().filter(|i| *i < rows.len()).collect(),
         _ => (0..rows.len()).collect(),
     };
     let total = indices.len();
-
-    // 落盘：new 截断重来；重跑 / 续跑在同一个文件上追加
-    let dir = run_store::current_dir(&app);
-    let mut meta = run_store::read_meta(&dir)?.unwrap_or(RunMeta {
-        run_id: cfg.run_id.clone(),
-        total: rows.len(),
-        started_at: run_store::now_ms(),
-        finished_at: None,
-        status: run_store::STATUS_RUNNING.into(),
-        error: None,
-    });
-    meta.run_id = cfg.run_id.clone();
-    meta.total = rows.len();
-    meta.status = run_store::STATUS_RUNNING.into();
-    meta.finished_at = None;
-    meta.error = None;
-    if cfg.mode == "new" {
-        // 新一轮要重算开始时间：沿用旧 meta 会让重启后的「已用时长」显示成上一轮的总时长
-        meta.started_at = run_store::now_ms();
-        run_store::reset(&dir, &meta)?;
-    } else {
-        run_store::write_meta(&dir, &meta)?;
+    if total == 0 {
+        return Err("没有需要处理的数据行".into());
     }
-    let writer = run_store::open_append(&dir)?;
 
-    let flag_for_sink = flag.clone();
+    // 429 闸门按连接共享：同一连接上的多个任务一起退避
+    let (target_gate, judge_gate) = {
+        let gates = app.state::<GateRegistry>();
+        (gates.gate_for(&cfg.target), gates.gate_for(&cfg.judge))
+    };
+
     let sink = Arc::new(Mutex::new(Sink {
         app: app.clone(),
+        run_id: cfg.run_id.clone(),
         writer,
         buf: Vec::new(),
         last_emit: Instant::now(),
@@ -545,9 +723,8 @@ pub async fn start_run(
         ok_rows: 0,
         first_error: None,
         run_error: None,
-        flag: flag_for_sink,
+        flag: flag.clone(),
     }));
-    let gate = Arc::new(AtomicU64::new(0));
     let finished = Arc::new(AtomicBool::new(false));
 
     let ticker = {
@@ -575,7 +752,8 @@ pub async fn start_run(
         let rows = rows.clone();
         let labels = labels.clone();
         let flag = flag.clone();
-        let gate = gate.clone();
+        let target_gate = target_gate.clone();
+        let judge_gate = judge_gate.clone();
         let sink = sink.clone();
         let tc = target_client.clone();
         let jc = judge_client.clone();
@@ -585,7 +763,19 @@ pub async fn start_run(
             }
             let row = rows[idx].clone();
             let label = labels.get(idx).cloned().unwrap_or_default();
-            if let Some(res) = run_one(&cfg, idx, &row, &tc, &jc, &label, &flag, &gate).await {
+            if let Some(res) = run_one(
+                &cfg,
+                idx,
+                &row,
+                &tc,
+                &jc,
+                &label,
+                &flag,
+                &target_gate,
+                &judge_gate,
+            )
+            .await
+            {
                 if let Ok(mut s) = sink.lock() {
                     s.push(res);
                 }
@@ -615,8 +805,6 @@ pub async fn start_run(
         )
     };
 
-    app.state::<RunRegistry>().remove(&cfg.run_id);
-
     let cancelled = flag.load(Ordering::SeqCst);
     // 运行级错误：落盘失败、连续调不通、或者跑完了但没有一条真正成功
     let mut error = write_err.or(run_error);
@@ -633,10 +821,19 @@ pub async fn start_run(
     } else {
         run_store::STATUS_FINISHED
     };
+
+    // 汇总结果写进 meta，任务列表不用解析 results.jsonl
+    meta.summary = run_store::load_dir(&dir)
+        .ok()
+        .flatten()
+        .map(|r| RunSummary::of(&r.results));
     meta.status = status.into();
     meta.finished_at = Some(run_store::now_ms());
     meta.error = error.clone();
     let _ = run_store::write_meta(&dir, &meta);
+
+    run_store::cleanup_finished(&run_store::runs_root(&app));
+    drop(lease);
 
     Ok(RunOutcome {
         run_id: cfg.run_id.clone(),

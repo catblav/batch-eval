@@ -5,23 +5,21 @@ export default {
   theme: {
     extend: {
       colors: {
-        // 全部走 CSS 变量，亮/暗两套主题共用同一批类名
-        ink: {
-          950: "rgb(var(--ink-950) / <alpha-value>)",
-          900: "rgb(var(--ink-900) / <alpha-value>)",
-          850: "rgb(var(--ink-850) / <alpha-value>)",
-          800: "rgb(var(--ink-800) / <alpha-value>)",
-          700: "rgb(var(--ink-700) / <alpha-value>)",
-          600: "rgb(var(--ink-600) / <alpha-value>)",
-          500: "rgb(var(--ink-500) / <alpha-value>)",
-          400: "rgb(var(--ink-400) / <alpha-value>)",
-          300: "rgb(var(--ink-300) / <alpha-value>)",
-          200: "rgb(var(--ink-200) / <alpha-value>)",
-        },
+        // 冷中性工具色板，亮/暗共用同一批语义类名
+        page: "rgb(var(--page) / <alpha-value>)",
+        panel: "rgb(var(--panel) / <alpha-value>)",
+        sidebar: "rgb(var(--sidebar) / <alpha-value>)",
+        wash: "rgb(var(--wash) / <alpha-value>)",
+        line: "rgb(var(--line) / <alpha-value>)",
+        main: "rgb(var(--text-main) / <alpha-value>)",
+        sub: "rgb(var(--text-sub) / <alpha-value>)",
+        weak: "rgb(var(--text-weak) / <alpha-value>)",
+        btn: "rgb(var(--btn) / <alpha-value>)",
+        btnfg: "rgb(var(--btn-fg) / <alpha-value>)",
+        accent: "rgb(var(--accent) / <alpha-value>)",
         pass: "rgb(var(--pass) / <alpha-value>)",
         fail: "rgb(var(--fail) / <alpha-value>)",
         warn: "rgb(var(--warn) / <alpha-value>)",
-        accent: "rgb(var(--accent) / <alpha-value>)",
       },
       fontFamily: {
         sans: ["Segoe UI", "Microsoft YaHei", "PingFang SC", "system-ui", "sans-serif"],

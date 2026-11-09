@@ -24,6 +24,27 @@ fn decode(bytes: &[u8]) -> String {
     }
 }
 
+/// 表头去重：第二个同名列改成「列名 (2)」，避免后一列覆盖前一列。
+fn dedupe_columns(raw: Vec<String>) -> Vec<String> {
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut out = Vec::with_capacity(raw.len());
+    for name in raw {
+        let base = name.trim().to_string();
+        let mut n = *seen.get(&base).unwrap_or(&0) + 1;
+        let mut candidate = if n == 1 { base.clone() } else { format!("{base} ({n})") };
+        // 用户数据里本来就可能有「列名 (2)」，继续顺延直到真正唯一
+        while used.contains(&candidate) {
+            n += 1;
+            candidate = format!("{base} ({n})");
+        }
+        seen.insert(base, n);
+        used.insert(candidate.clone());
+        out.push(candidate);
+    }
+    out
+}
+
 fn sniff_delimiter(line: &str) -> char {
     let commas = line.matches(',').count();
     let tabs = line.matches('\t').count();
@@ -45,18 +66,20 @@ fn from_csv_text(text: &str, source: &str) -> Result<Dataset, String> {
         .headers()
         .map_err(|e| format!("读取表头失败：{e}"))?
         .clone();
-    let columns: Vec<String> = headers
-        .iter()
-        .enumerate()
-        .map(|(i, h)| {
-            let t = h.trim();
-            if t.is_empty() {
-                format!("列{}", i + 1)
-            } else {
-                t.to_string()
-            }
-        })
-        .collect();
+    let columns = dedupe_columns(
+        headers
+            .iter()
+            .enumerate()
+            .map(|(i, h)| {
+                let t = h.trim();
+                if t.is_empty() {
+                    format!("列{}", i + 1)
+                } else {
+                    t.to_string()
+                }
+            })
+            .collect(),
+    );
     let mut rows = Vec::new();
     let mut skipped = 0usize;
     for rec in rdr.records() {
@@ -162,18 +185,20 @@ fn from_xlsx_bytes(bytes: &[u8], source: &str) -> Result<Dataset, String> {
         .map_err(|e| format!("读取工作表失败：{e}"))?;
     let mut iter = range.rows();
     let header = iter.next().ok_or_else(|| "Excel 内容为空".to_string())?;
-    let columns: Vec<String> = header
-        .iter()
-        .enumerate()
-        .map(|(i, c)| {
-            let t = cell_to_string(c);
-            if t.is_empty() {
-                format!("列{}", i + 1)
-            } else {
-                t
-            }
-        })
-        .collect();
+    let columns = dedupe_columns(
+        header
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let t = cell_to_string(c);
+                if t.is_empty() {
+                    format!("列{}", i + 1)
+                } else {
+                    t
+                }
+            })
+            .collect(),
+    );
     let mut rows = Vec::new();
     for row in iter {
         let mut m = Map::new();
@@ -229,6 +254,10 @@ fn from_plain_text(text: &str, source: &str) -> Result<Dataset, String> {
     })
 }
 
+pub fn parse_bytes(bytes: &[u8], filename: &str) -> Result<Dataset, String> {
+    detect_and_parse(bytes, filename)
+}
+
 fn detect_and_parse(bytes: &[u8], filename: &str) -> Result<Dataset, String> {
     let lower = filename.to_lowercase();
     if lower.ends_with(".xlsx") || lower.ends_with(".xlsm") || bytes.starts_with(b"PK\x03\x04") {
@@ -257,14 +286,13 @@ pub async fn parse_dataset_file(path: String) -> Result<Dataset, String> {
 }
 
 /// 直接粘贴的文本：优先按 JSON 解析，其次 CSV/TSV，最后按文本块切分。
-#[tauri::command]
-pub async fn parse_dataset_text(text: String, format: Option<String>) -> Result<Dataset, String> {
+pub fn parse_text(text: &str, format: Option<&str>) -> Result<Dataset, String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Err("内容为空".into());
     }
     let fmt = format.unwrap_or_default();
-    let mut ds = match fmt.as_str() {
+    let mut ds = match fmt {
         "json" => from_json_text(trimmed, "粘贴内容")?,
         "csv" => from_csv_text(trimmed, "粘贴内容")?,
         "text" => from_plain_text(trimmed, "粘贴内容")?,
@@ -283,4 +311,9 @@ pub async fn parse_dataset_text(text: String, format: Option<String>) -> Result<
     };
     ds.source = "粘贴内容".to_string();
     Ok(ds)
+}
+
+#[tauri::command]
+pub async fn parse_dataset_text(text: String, format: Option<String>) -> Result<Dataset, String> {
+    parse_text(&text, format.as_deref())
 }

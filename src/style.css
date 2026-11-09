@@ -2,44 +2,39 @@
 @tailwind components;
 @tailwind utilities;
 
-/* ---------- 主题变量 ---------- */
+/* ---------- 冷中性主题变量 ---------- */
 :root {
-  /* 亮色：暖灰底，不用纯白，长时间看不刺眼 */
-  --ink-950: 245 244 241; /* 页面底色 */
-  --ink-900: 252 251 249; /* 卡片 */
-  --ink-850: 241 240 236; /* 次级面 */
-  --ink-800: 233 231 226; /* hover */
-  --ink-700: 219 216 209; /* 边框 */
-  --ink-600: 198 194 186;
-  --ink-500: 146 141 132; /* 弱文本 */
-  --ink-400: 108 103 95;
-  --ink-300: 74 70 64;
-  --ink-200: 42 39 35; /* 主文本 */
-  --pass: 47 140 96;
-  --fail: 190 72 66;
-  --warn: 184 133 42;
-  --accent: 62 106 200;
-  --shadow: 0 1px 2px rgba(30, 28, 24, 0.06), 0 4px 12px rgba(30, 28, 24, 0.04);
-  --sel: 62 106 200;
+  --page: 242 244 247; /* #F2F4F7 */
+  --panel: 255 255 255; /* #FFFFFF */
+  --sidebar: 247 249 251; /* #F7F9FB */
+  --wash: 237 241 245; /* #EDF1F5 */
+  --line: 221 227 233; /* #DDE3E9 */
+  --text-main: 28 36 48; /* #1C2430 */
+  --text-sub: 95 107 122; /* #5F6B7A */
+  --text-weak: 138 150 165; /* #8A96A5 */
+  --btn: 34 43 54; /* #222B36 */
+  --btn-fg: 255 255 255;
+  --accent: 61 111 168; /* #3D6FA8 */
+  --pass: 30 142 90; /* #1E8E5A */
+  --fail: 196 71 63; /* #C4473F */
+  --warn: 176 122 34; /* #B07A22 */
 }
 
 .dark {
-  --ink-950: 12 14 17;
-  --ink-900: 20 23 28;
-  --ink-850: 26 30 36;
-  --ink-800: 34 39 47;
-  --ink-700: 46 52 62;
-  --ink-600: 62 70 82;
-  --ink-500: 96 105 118;
-  --ink-400: 138 147 160;
-  --ink-300: 184 193 205;
-  --ink-200: 222 228 236;
-  --pass: 88 190 138;
-  --fail: 226 110 104;
-  --warn: 226 176 88;
-  --accent: 116 155 240;
-  --shadow: none;
-  --sel: 116 155 240;
+  --page: 14 17 22; /* #0E1116 */
+  --panel: 21 26 33; /* #151A21 */
+  --sidebar: 17 21 27; /* #11151B */
+  --wash: 29 36 45; /* #1D242D */
+  --line: 40 48 58; /* #28303A */
+  --text-main: 228 232 238; /* #E4E8EE */
+  --text-sub: 150 161 174; /* #96A1AE */
+  --text-weak: 110 122 136; /* #6E7A88 */
+  --btn: 228 232 238;
+  --btn-fg: 21 26 33;
+  --accent: 127 166 217; /* #7FA6D9 */
+  --pass: 76 195 138; /* #4CC38A */
+  --fail: 240 113 103; /* #F07167 */
+  --warn: 224 178 82; /* #E0B252 */
 }
 
 @layer base {
@@ -48,8 +43,6 @@
   #app {
     height: 100%;
   }
-  /* WebView2 在 Windows 上对触控板滚动做了回弹（overscroll bounce），
-     内容本来放得下也会整页跟着手指晃。根节点关掉，滚动只发生在真正的滚动容器里。 */
   html,
   body {
     overscroll-behavior: none;
@@ -58,8 +51,8 @@
     overflow: hidden;
   }
   body {
-    @apply bg-ink-950 text-ink-200 antialiased;
-    font-size: 14px;
+    @apply bg-page text-main antialiased;
+    font-size: 13px;
     color-scheme: light;
   }
   .dark body {
@@ -70,10 +63,15 @@
     height: 10px;
   }
   ::-webkit-scrollbar-thumb {
-    @apply bg-ink-700 rounded;
+    background: rgb(var(--line));
+    border-radius: 5px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
   }
   ::-webkit-scrollbar-thumb:hover {
-    @apply bg-ink-600;
+    background: rgb(var(--text-weak));
+    background-clip: padding-box;
+    border: 2px solid transparent;
   }
   ::-webkit-scrollbar-track {
     background: transparent;
@@ -83,72 +81,160 @@
   select {
     @apply outline-none;
   }
+  :focus-visible {
+    outline: 2px solid rgb(var(--accent) / 0.55);
+    outline-offset: 1px;
+  }
   ::selection {
-    background: rgb(var(--sel) / 0.22);
+    background: rgb(var(--accent) / 0.22);
   }
   input[type="checkbox"] {
     accent-color: rgb(var(--accent));
   }
+  button {
+    -webkit-tap-highlight-color: transparent;
+  }
 }
 
 @layer components {
+  /* ---- 面 ---- */
+  .surface {
+    @apply bg-panel border border-line rounded-md;
+  }
+  .surface-header {
+    @apply h-12 px-4 flex items-center gap-3 border-b border-line shrink-0;
+  }
+
+  /* ---- 按钮 ---- */
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 h-8 px-3 rounded
+      border border-line bg-panel text-main text-[13px] font-medium
+      hover:bg-wash hover:border-weak/40 active:translate-y-px
+      transition-colors select-none
+      disabled:opacity-40 disabled:cursor-not-allowed disabled:active:translate-y-0;
+  }
+  .btn-primary {
+    @apply btn border-transparent bg-btn text-btnfg hover:bg-btn/90 hover:border-transparent;
+  }
+  .btn-ghost {
+    @apply btn border-transparent bg-transparent text-sub
+      hover:bg-wash hover:text-main;
+  }
+  .btn-danger {
+    @apply btn text-fail hover:bg-fail/10 hover:border-fail/40;
+  }
+  .btn-sm {
+    @apply h-7 px-2.5 text-[12.5px];
+  }
+  .icon-btn {
+    @apply inline-flex items-center justify-center w-7 h-7 rounded
+      text-sub hover:text-main hover:bg-wash transition-colors
+      disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+
+  /* ---- 表单 ---- */
   .field {
-    @apply w-full bg-ink-900 border border-ink-700 rounded-md px-3 py-2 text-ink-200 text-[13px]
-      placeholder:text-ink-500 focus:border-accent focus:ring-1 focus:ring-accent/30 transition;
-    box-shadow: var(--shadow);
+    @apply w-full bg-panel border border-line rounded px-2.5 py-1.5
+      text-[13px] text-main placeholder:text-weak
+      focus:border-accent focus:ring-1 focus:ring-accent/25 transition-colors;
+  }
+  input.field,
+  select.field {
+    height: 32px;
   }
   .field-mono {
     @apply field font-mono text-[12.5px] leading-relaxed;
   }
-  .btn {
-    @apply inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-[13px]
-      border border-ink-700 bg-ink-850 text-ink-200 hover:bg-ink-800 hover:border-ink-600
-      transition disabled:opacity-40 disabled:cursor-not-allowed select-none;
-  }
-  .btn-primary {
-    @apply btn bg-accent border-accent text-white hover:bg-accent/90 hover:border-accent/90;
-  }
-  .btn-ghost {
-    @apply btn bg-transparent border-transparent text-ink-400 hover:text-ink-200 hover:bg-ink-850;
-  }
-  .btn-danger {
-    @apply btn text-fail border-ink-700 hover:bg-fail/10 hover:border-fail/40;
-  }
-  .card {
-    @apply bg-ink-900 border border-ink-700/80 rounded-lg;
-    box-shadow: var(--shadow);
-  }
   .label {
-    @apply block text-[12px] text-ink-400 mb-1.5 font-medium;
+    @apply block text-[12px] text-sub font-medium mb-1.5;
   }
   .hint {
-    @apply text-[11.5px] text-ink-500 leading-relaxed;
+    @apply text-[12px] text-weak leading-relaxed;
+  }
+
+  /* ---- 导航 ---- */
+  .nav-item {
+    @apply relative w-full flex items-center gap-2.5 h-9 px-3 rounded
+      text-[13px] text-sub hover:text-main hover:bg-wash
+      transition-colors select-none;
+  }
+  .nav-item-active {
+    @apply text-main bg-wash font-medium;
+  }
+  .nav-item-active::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 6px;
+    bottom: 6px;
+    width: 2px;
+    border-radius: 1px;
+    background: rgb(var(--accent));
+  }
+
+  /* ---- 列表 ---- */
+  .list-item {
+    @apply w-full text-left px-3 py-2.5 rounded border border-transparent
+      hover:bg-wash transition-colors cursor-pointer select-none;
+  }
+  .list-item-active {
+    @apply bg-wash border-line;
   }
   .chip {
-    @apply inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] border;
+    @apply inline-flex items-center gap-1 h-6 px-2 rounded border border-line
+      bg-wash text-[11.5px] text-sub whitespace-nowrap;
   }
-  /* 表头内的列筛选下拉：尽量小，不抢列标题的视觉权重 */
-  .col-filter {
-    @apply bg-transparent border border-ink-700 rounded px-1 py-0.5 text-[11px] text-ink-400
-      hover:text-ink-200 hover:border-ink-600 focus:border-accent transition cursor-pointer;
+
+  /* ---- 页签（下划线式） ---- */
+  .editor-tab {
+    @apply inline-flex items-center h-9 px-3 border-b-2 border-transparent
+      text-[13px] text-sub hover:text-main transition-colors select-none;
   }
-  .tab {
-    @apply px-3 py-1.5 rounded-md text-[13px] text-ink-400 hover:text-ink-200 cursor-pointer transition;
+  .editor-tab-active {
+    @apply border-accent text-main font-medium;
   }
-  .tab-active {
-    @apply bg-ink-900 text-ink-200;
-    box-shadow: var(--shadow);
+
+  /* ---- 表格 ---- */
+  .data-table {
+    @apply w-full text-[12.5px] border-collapse;
   }
-  .panel {
-    @apply bg-ink-850/60 border border-ink-700/60 rounded-md;
+  .data-table th {
+    @apply sticky top-0 z-10 bg-panel text-left font-medium text-sub
+      border-b border-line px-2.5 py-2 whitespace-nowrap;
+  }
+  .data-table td {
+    @apply border-b border-line/70 px-2.5 py-1.5 align-top text-main;
+  }
+  .data-table tbody tr {
+    @apply hover:bg-wash/70 transition-colors;
+  }
+  .data-table tbody tr.row-active {
+    @apply bg-accent/10;
+  }
+
+  /* ---- 状态 ---- */
+  .stat-number {
+    @apply text-[26px] leading-none font-semibold tabular-nums;
+  }
+  .dot {
+    @apply inline-block w-1.5 h-1.5 rounded-full shrink-0;
   }
 }
 
-/* 滚动容器滑到边界后不再把滚动链传给外层：
-   否则表格滑到底时，鼠标还停在表格上，整页也跟着动。 */
+/* 滚动容器到边界后不把滚动链传给外层 */
 .overflow-auto,
 .overflow-scroll,
 .overflow-y-auto,
 .overflow-x-auto {
   overscroll-behavior: contain;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

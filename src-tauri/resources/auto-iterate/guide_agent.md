@@ -23,11 +23,13 @@
 >
 > **2. 配置 API**
 >
-> 打开「黑猫-自动评测台」→ ① API 配置，两张卡：
-> - 被测模型：你要评测的提示词跑在哪个模型上。Base URL 填接口地址，模型名照接口文档填，API Key 粘进去。
-> - 评测模型（裁判）：负责判分。被测模型配好后点「同步到评测模型」可以复用同一套。
+> 打开「黑猫-自动评测台」→ 左侧「API 配置」，建两条连接：
+> - 被测连接：你要评测的提示词跑在哪个模型上。Base URL 填接口地址，模型名照接口文档填，API Key 粘进去。
+> - 评测连接（裁判）：负责判分，可以用同一套 API，也可以换更便宜的模型。
 >
-> 每张卡可以先点「测试连接」确认能通；点「测速」会发 3 次短请求，给出实际延迟和 tok/s——跑得慢是接口的事还是评测台的事，一眼能看出来。确认没问题点「保存配置」。
+> 每条连接都可以点「测试连接」确认能通；点「测速」会发 3 次短请求，给出实际延迟和 tok/s——跑得慢是接口的事还是评测台的事，一眼能看出来。
+>
+> 然后到「提示词配置」新建一个方案，把被测连接和评测连接选上。评测台会把当前方案的连接和提示词同步给自动迭代脚本。
 
 ### 用户回复之后，按顺序做
 
@@ -113,9 +115,9 @@ python "<脚本>" --workdir <工作目录> --dataset <文件> --list
 
 | 系统 | 路径 |
 | --- | --- |
-| Windows | `%APPDATA%\com.batcheval.app\settings.json` |
-| macOS | `~/Library/Application Support/com.batcheval.app/settings.json` |
-| Linux | `~/.config/com.batcheval.app/settings.json` |
+| Windows | `%APPDATA%\com.batcheval.desktop\settings.json` |
+| macOS | `~/Library/Application Support/com.batcheval.desktop/settings.json` |
+| Linux | `~/.config/com.batcheval.desktop/settings.json` |
 
 这条路上脚本以只读方式读配置，不会改它。里面的 apiKey 是明文，**不要打印、不要复制到任何文件或日志里**。
 

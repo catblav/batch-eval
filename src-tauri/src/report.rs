@@ -17,6 +17,14 @@ const CELL_LIMIT: usize = 30000;
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ReportPayload {
+    /// 本期评测名称，作为报告文档标题
+    #[serde(default)]
+    pub title: String,
+    /// 方案名与数据集名，概览里展示
+    #[serde(default)]
+    pub plan_name: String,
+    #[serde(default)]
+    pub dataset_name: String,
     #[serde(default)]
     pub generated_at: String,
     #[serde(default)]
@@ -116,14 +124,14 @@ pub struct ReportRow {
 
 // ---------- 配色（与界面同一套语义） ----------
 
-const BRAND: Color = Color::RGB(0x2F5D8A);
-const BRAND_SOFT: Color = Color::RGB(0xEAF1F8);
+const BRAND: Color = Color::RGB(0x3D6FA8);
+const BRAND_SOFT: Color = Color::RGB(0xEDF2F9);
 const PASS_BG: Color = Color::RGB(0xE6F4EC);
-const PASS_FG: Color = Color::RGB(0x1F7A4D);
+const PASS_FG: Color = Color::RGB(0x1E8E5A);
 const FAIL_BG: Color = Color::RGB(0xFBEAEA);
-const FAIL_FG: Color = Color::RGB(0xB33A35);
+const FAIL_FG: Color = Color::RGB(0xC4473F);
 const WARN_BG: Color = Color::RGB(0xFCF3E2);
-const WARN_FG: Color = Color::RGB(0x8A5B00);
+const WARN_FG: Color = Color::RGB(0xB07A22);
 const TEXT: Color = Color::RGB(0x2B2B2B);
 const MUTED: Color = Color::RGB(0x6B7280);
 const BORDER: Color = Color::RGB(0xD8DDE3);
@@ -331,7 +339,13 @@ fn write_overview(ws: &mut Worksheet, p: &ReportPayload) -> Result<(), String> {
         ws.set_column_width(i as u16, *w).map_err(|e| e.to_string())?;
     }
 
-    ws.merge_range(0, 0, 0, 5, "批量评测报告", &title_fmt())
+    // 用用户填的评测名称当报告标题；没填就退回通用名称
+    let heading = if p.title.trim().is_empty() {
+        "批量评测报告".to_string()
+    } else {
+        p.title.trim().to_string()
+    };
+    ws.merge_range(0, 0, 0, 5, &heading, &title_fmt())
         .map_err(|e| e.to_string())?;
     ws.set_row_height(0, 40.0).map_err(|e| e.to_string())?;
 
@@ -346,8 +360,24 @@ fn write_overview(ws: &mut Worksheet, p: &ReportPayload) -> Result<(), String> {
     ws.merge_range(1, 0, 1, 5, &generated, &note_fmt())
         .map_err(|e| e.to_string())?;
 
+    let source = {
+        let pn = if p.plan_name.trim().is_empty() {
+            "默认方案"
+        } else {
+            p.plan_name.trim()
+        };
+        let dn = if p.dataset_name.trim().is_empty() {
+            "默认数据集"
+        } else {
+            p.dataset_name.trim()
+        };
+        format!("方案 {pn} · 数据集 {dn}")
+    };
+    ws.merge_range(2, 0, 2, 5, &source, &note_fmt())
+        .map_err(|e| e.to_string())?;
+
     // 模型参数：被测模型与评测模型并排，方便对照
-    let mut r = 3u32;
+    let mut r = 4u32;
     ws.merge_range(r, 0, r, 5, "模型参数", &section_fmt())
         .map_err(|e| e.to_string())?;
     r += 1;
@@ -394,8 +424,16 @@ fn write_overview(ws: &mut Worksheet, p: &ReportPayload) -> Result<(), String> {
         ("temperature", num_or_dash(t.temperature), num_or_dash(j.temperature)),
         ("top_p", num_or_dash(t.top_p), num_or_dash(j.top_p)),
         ("超时 (秒)", num_or_dash(t.timeout_secs), num_or_dash(j.timeout_secs)),
-        ("高级参数 (extra body)", text_or_dash(&t.extra_body), text_or_dash(&j.extra_body)),
-        ("自定义请求头", text_or_dash(&t.extra_headers), text_or_dash(&j.extra_headers)),
+        (
+            "高级参数 (extra body)",
+            text_or_dash(&crate::storage::redact_sensitive_json(&t.extra_body)),
+            text_or_dash(&crate::storage::redact_sensitive_json(&j.extra_body)),
+        ),
+        (
+            "自定义请求头",
+            text_or_dash(&crate::storage::redact_sensitive_json(&t.extra_headers)),
+            text_or_dash(&crate::storage::redact_sensitive_json(&j.extra_headers)),
+        ),
     ];
     for (i, (label, tv, jv)) in param_rows.iter().enumerate() {
         let base = zebra(i);
@@ -623,9 +661,14 @@ pub async fn export_excel_report(path: String, payload: ReportPayload) -> Result
     write_categories(wb.add_worksheet(), &payload)?;
     write_rows(wb.add_worksheet(), &payload)?;
 
+    let doc_title = if payload.title.trim().is_empty() {
+        "批量评测报告".to_string()
+    } else {
+        payload.title.trim().to_string()
+    };
     wb.set_properties(
         &DocProperties::new()
-            .set_title("批量评测报告")
+            .set_title(&doc_title)
             .set_subject(if payload.target_profile.model.is_empty() {
                 "批量评测"
             } else {
@@ -645,6 +688,9 @@ mod tests {
 
     fn sample() -> ReportPayload {
         ReportPayload {
+            title: "测试主题".into(),
+            plan_name: "客服话术-v3".into(),
+            dataset_name: "客服问题.csv".into(),
             generated_at: "2026-11-02T10:00:00Z".into(),
             dataset_rows: 4,
             target_profile: ProfileInfo {

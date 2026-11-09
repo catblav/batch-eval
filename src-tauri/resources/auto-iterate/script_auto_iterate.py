@@ -57,7 +57,7 @@ def workdir_of(args):
     return os.path.abspath(wd) if wd else os.getcwd()
 
 
-APP_ID = "com.batcheval.app"
+APP_ID = "com.batcheval.desktop"
 STATE_NAME = "regression_state.json"
 ARCHIVE_DIR_NAME = "提示词历史"
 LOG_NAME = "regression_log.csv"

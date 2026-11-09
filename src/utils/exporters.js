@@ -34,6 +34,21 @@ function stampedPath(name, ext) {
   return `${name}_${timeSuffix()}.${ext}`;
 }
 
+/// 标题会进文件名，Windows 不允许的字符统一换掉
+function safeTitle(title) {
+  return String(title || "")
+    .replace(/[\\/:*?"<>|\x00-\x1f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 60);
+}
+
+/// 有评测标题就用「标题_通用名_时间」，没有退回原来的「通用名_时间」
+function stemWith(title, fallback) {
+  const t = safeTitle(title);
+  return t ? `${t}_${fallback}` : fallback;
+}
+
 function esc(v) {
   const s = v === null || v === undefined ? "" : String(v);
   if (/[",\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
@@ -60,10 +75,10 @@ function rowOf(r) {
   ].map(esc);
 }
 
-export async function exportCsv(results) {
+export async function exportCsv(results, title = "") {
   try {
     const path = await save({
-      defaultPath: stampedPath("评测结果", "csv"),
+      defaultPath: stampedPath(stemWith(title, "评测结果"), "csv"),
       filters: [{ name: "CSV", extensions: ["csv"] }],
     });
     if (!path) return;
@@ -83,10 +98,10 @@ export async function exportCsv(results) {
   }
 }
 
-export async function exportJson(results, columns) {
+export async function exportJson(results, columns, title = "") {
   try {
     const path = await save({
-      defaultPath: stampedPath("评测结果", "json"),
+      defaultPath: stampedPath(stemWith(title, "评测结果"), "json"),
       filters: [{ name: "JSON", extensions: ["json"] }],
     });
     if (!path) return;
@@ -116,7 +131,7 @@ export async function exportJson(results, columns) {
 export async function exportFullReport(payload) {
   try {
     const path = await save({
-      defaultPath: stampedPath("评测报告", "xlsx"),
+      defaultPath: stampedPath(stemWith(payload.title, "评测报告"), "xlsx"),
       filters: [{ name: "Excel 工作簿", extensions: ["xlsx"] }],
     });
     if (!path) return;

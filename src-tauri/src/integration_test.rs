@@ -98,6 +98,7 @@ mod dataset_tests {
 #[cfg(test)]
 mod var_injection {
     use crate::api::ApiProfile;
+    use crate::run_store::PromptSnapshot;
     use crate::runner::RunConfig;
 
     fn profile() -> ApiProfile {
@@ -120,17 +121,24 @@ mod var_injection {
     #[ignore]
     async fn vars_reach_target_and_judge() {
         let cfg = RunConfig {
-            // 主体提示词与用户消息都引用数据列
-            system_prompt: "模式：{{mode}}\n<<<RULES>>>\n{{rules}}\n<<<END>>>".into(),
-            user_template: "{{content}}".into(),
-            eval_prompt: "【给裁判的输入】\n{{input}}\n【被测输出】\n{{output}}".into(),
+            run_id: "t-var".into(),
+            title: "集成测试".into(),
+            plan_id: "p-test".into(),
+            plan_name: "集成方案".into(),
+            prompts: PromptSnapshot {
+                // 主体提示词与用户消息都引用数据列
+                system_prompt: "模式：{{mode}}\n<<<RULES>>>\n{{rules}}\n<<<END>>>".into(),
+                user_template: "{{content}}".into(),
+                eval_prompt: "【给裁判的输入】\n{{input}}\n【被测输出】\n{{output}}".into(),
+            },
+            dataset_id: "d-test".into(),
+            dataset_name: "集成数据".into(),
             target: profile(),
             judge: profile(),
             concurrency: 1,
             max_retries: 0,
             mode: "newRun".into(),
             retry_indices: None,
-            run_id: "t-var".into(),
         };
         let mut row = serde_json::Map::new();
         row.insert("mode".into(), serde_json::json!("strict"));

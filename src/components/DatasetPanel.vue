@@ -1,219 +1,385 @@
 <script setup>
-import { ref, computed, watch } from "vue";
-import { state, toast, ensureUserTemplate, statusLabelOf } from "../store";
-import { invoke } from "@tauri-apps/api/core";
+import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
+import {
+  state,
+  toast,
+  datasetMetaById,
+  loadDatasetPreview,
+  importDatasetFile,
+  importDatasetText,
+  replaceDataset,
+  renameDataset,
+  removeDataset,
+} from "../store";
 import { open, ask } from "@tauri-apps/plugin-dialog";
+import Icon from "./Icon.vue";
 import Pager from "./Pager.vue";
 
+const search = ref("");
 const pasteOpen = ref(false);
 const pasteText = ref("");
+const pasteName = ref("");
 const pasteFormat = ref("auto");
-const loading = ref(false);
-
-const columns = computed(() => state.dataset.columns);
-const rows = computed(() => state.dataset.rows);
-const statusCol = computed(() => columns.value.includes("数据组状态"));
-const skipped = computed(() => Number(state.dataset.skipped) || 0);
-const largeData = computed(() => rows.value.length > 20000);
-
-// 预览分页：数据集可能上万条，只渲染当前页
+const busy = ref(false);
 const page = ref(1);
 const pageSize = ref(50);
-const pageCount = computed(() => Math.max(1, Math.ceil(rows.value.length / Math.max(1, pageSize.value))));
-const pagedRows = computed(() => {
-  const size = Math.max(1, pageSize.value);
-  const p = Math.min(Math.max(1, page.value), pageCount.value);
-  const start = (p - 1) * size;
-  return rows.value.slice(start, start + size);
+const menuId = ref("");
+const nameDraft = ref("");
+const nameInput = ref(null);
+
+const active = computed(() => datasetMetaById(state.activeDatasetId));
+const preview = computed(() => state.datasetPreview);
+const total = computed(() => preview.value.id === state.activeDatasetId ? preview.value.total : 0);
+const rows = computed(() => preview.value.id === state.activeDatasetId ? preview.value.rows : []);
+const columns = computed(() => preview.value.id === state.activeDatasetId ? preview.value.columns : []);
+const offset = computed(() => (page.value - 1) * pageSize.value);
+const large = computed(() => total.value > 20000);
+const usedBy = computed(() =>
+  active.value ? state.plans.filter((p) => p.datasetId === active.value.id) : []
+);
+const statusCol = computed(() => columns.value.includes("数据组状态"));
+
+const filtered = computed(() => {
+  const q = search.value.trim().toLowerCase();
+  if (!q) return state.datasets;
+  return state.datasets.filter((d) =>
+    [d.name, d.source].join(" ").toLowerCase().includes(q)
+  );
 });
-const startNo = computed(
-  () => (Math.min(Math.max(1, page.value), pageCount.value) - 1) * pageSize.value
+
+watch(
+  () => state.activeDatasetId,
+  async (id) => {
+    page.value = 1;
+    nameDraft.value = active.value?.name || "";
+    if (id) await loadDatasetPreview(id, 0, pageSize.value);
+  },
+  { immediate: true }
 );
 
-// 换数据集或改每页条数后回到第一页
 watch(
-  () => rows.value.length,
-  () => {
-    page.value = 1;
+  () => active.value?.name,
+  (n) => {
+    if (n && nameDraft.value === "") nameDraft.value = n;
   }
 );
-function onPageSize(n) {
-  pageSize.value = n;
-  page.value = 1;
+
+async function loadPage(p) {
+  if (!active.value) return;
+  page.value = p;
+  await loadDatasetPreview(active.value.id, (p - 1) * pageSize.value, pageSize.value);
 }
 
-watch(columns, (cols) => {
-  if (!cols.length) return;
-  // 默认注入所有列，但状态列除外
-  state.selectedColumns = cols.filter((c) => c !== "数据组状态");
-  ensureUserTemplate();
-});
+async function onPageSize(n) {
+  pageSize.value = n;
+  page.value = 1;
+  if (active.value) await loadDatasetPreview(active.value.id, 0, n);
+}
 
-async function importFile() {
+async function commitName() {
+  if (!active.value) return;
+  const name = nameDraft.value.trim();
+  if (!name) {
+    nameDraft.value = active.value.name;
+    return;
+  }
+  if (name === active.value.name) return;
+  try {
+    await renameDataset(active.value.id, name);
+    toast("已重命名", "ok");
+  } catch (e) {
+    nameDraft.value = active.value.name;
+    toast("重命名失败：" + e, "err");
+  }
+}
+
+async function chooseFile() {
   try {
     const path = await open({
       multiple: false,
-      filters: [{ name: "数据集", extensions: ["csv", "tsv", "xlsx", "xlsm", "json", "jsonl", "txt", "md"] }],
+      filters: [
+        {
+          name: "数据集",
+          extensions: ["csv", "tsv", "xlsx", "xlsm", "json", "jsonl", "txt", "md"],
+        },
+      ],
     });
     if (!path) return;
-    loading.value = true;
-    const ds = await invoke("parse_dataset_file", { path });
-    await apply(ds);
+    busy.value = true;
+    await importDatasetFile(path);
+    page.value = 1;
   } catch (e) {
-    toast(String(e), "err");
+    toast("导入失败：" + e, "err");
   } finally {
-    loading.value = false;
+    busy.value = false;
   }
 }
 
-async function applyPaste() {
-  if (!pasteText.value.trim()) return;
-  loading.value = true;
+async function submitPaste() {
+  if (!pasteText.value.trim()) {
+    toast("先粘贴数据", "info");
+    return;
+  }
+  busy.value = true;
   try {
-    const ds = await invoke("parse_dataset_text", {
-      text: pasteText.value,
-      format: pasteFormat.value === "auto" ? null : pasteFormat.value,
-    });
-    await apply(ds);
+    await importDatasetText(
+      pasteText.value,
+      pasteFormat.value === "auto" ? null : pasteFormat.value,
+      pasteName.value.trim() || null
+    );
     pasteOpen.value = false;
     pasteText.value = "";
+    pasteName.value = "";
+    page.value = 1;
   } catch (e) {
-    toast(String(e), "err");
+    toast("解析失败：" + e, "err");
   } finally {
-    loading.value = false;
+    busy.value = false;
   }
 }
 
-async function apply(ds) {
-  const n = ds.rows.length;
-  // 十万条以上大概率是误选了整个导出表，先让用户确认一次
-  if (n > 100000) {
-    const ok = await ask(
-      `这份数据有 ${n.toLocaleString()} 条，单批跑完耗时极长、内存占用也大。确定要载入吗？`,
-      { title: "数据量过大", kind: "warning", okLabel: "载入", cancelLabel: "取消" }
-    );
-    if (!ok) return;
+function openMenu() {
+  menuId.value = menuId.value ? "" : "main";
+}
+
+async function replace() {
+  menuId.value = "";
+  if (!active.value) return;
+  const path = await open({
+    multiple: false,
+    filters: [
+      {
+        name: "数据集",
+        extensions: ["csv", "tsv", "xlsx", "xlsm", "json", "jsonl", "txt", "md"],
+      },
+    ],
+  });
+  if (!path) return;
+  const ok = await ask(
+    `用新文件替换「${active.value.name}」的全部数据？\n\n已完成的评测保留自己的数据快照，不受影响；正在运行或中断的任务可能无法继续。`,
+    { title: "替换数据", kind: "warning", okLabel: "替换", cancelLabel: "取消" }
+  );
+  if (!ok) return;
+  busy.value = true;
+  try {
+    await replaceDataset(active.value.id, path);
+    page.value = 1;
+  } catch (e) {
+    toast("替换失败：" + e, "err");
+  } finally {
+    busy.value = false;
   }
-  state.dataset = ds;
-  toast(`已载入 ${n.toLocaleString()} 条数据，${ds.columns.length} 列`, "ok");
 }
 
-function toggleColumn(col) {
-  const set = new Set(state.selectedColumns);
-  if (set.has(col)) set.delete(col);
-  else set.add(col);
-  state.selectedColumns = columns.value.filter((c) => set.has(c));
-  state.prompts.userTemplate = state.selectedColumns.map((c) => `{{${c}}}`).join("\n\n");
+function blockedByJob() {
+  return state.jobs.list.find(
+    (j) =>
+      j.datasetId === active.value?.id &&
+      ["running", "cancelling", "interrupted"].includes(j.status)
+  );
 }
 
-function clear() {
-  state.dataset = { columns: [], rows: [], source: "", skipped: 0 };
-  state.selectedColumns = [];
-  toast("已清空数据集", "ok");
+async function remove() {
+  menuId.value = "";
+  if (!active.value) return;
+  const job = blockedByJob();
+  if (job) {
+    toast(`任务「${job.title}」正在使用这个数据集，先取消或等它结束`, "err");
+    return;
+  }
+  const affected = usedBy.value.map((p) => p.name);
+  const msg = affected.length
+    ? `删除「${active.value.name}」？\n\n以下方案会失去数据集：${affected.join("、")}`
+    : `删除「${active.value.name}」？`;
+  const ok = await ask(msg, {
+    title: "删除数据集",
+    kind: "warning",
+    okLabel: "删除",
+    cancelLabel: "取消",
+  });
+  if (!ok) return;
+  try {
+    await removeDataset(active.value.id);
+    toast("已删除数据集", "ok");
+  } catch (e) {
+    toast("删除失败：" + e, "err");
+  }
 }
 
-function sample(row, col) {
-  const v = String(row[col] ?? "");
-  return v.length > 90 ? v.slice(0, 90) + "…" : v;
+function sample(v) {
+  const s = String(v ?? "");
+  return s.length > 120 ? s.slice(0, 120) + "…" : s;
 }
+
+function closeMenu() {
+  menuId.value = "";
+}
+
+onMounted(() => window.addEventListener("click", closeMenu));
+onBeforeUnmount(() => window.removeEventListener("click", closeMenu));
 </script>
 
 <template>
-  <div class="space-y-4">
-    <div class="card p-4">
-      <div class="flex items-center gap-2 mb-3">
-        <span class="text-[13px] font-semibold">数据集</span>
-        <span v-if="rows.length" class="hint">{{ rows.length }} 条 · {{ columns.length }} 列 · {{ state.dataset.source }}</span>
-        <span v-else class="hint">支持 CSV / TSV / Excel / JSON / JSONL / 文本，中文编码自动识别</span>
+  <div class="h-full flex bg-page">
+    <aside class="w-[280px] shrink-0 flex flex-col border-r border-line min-h-0">
+      <div class="h-14 px-4 flex items-center gap-2 shrink-0">
+        <h1 class="text-[15px] font-semibold">数据集</h1>
+        <span class="text-[12px] text-weak tabular-nums">{{ state.datasets.length }}</span>
         <span class="flex-1" />
-        <button class="btn text-[12px]" @click="pasteOpen = !pasteOpen">粘贴数据</button>
-        <button class="btn-primary text-[12px]" :disabled="loading" @click="importFile">
-          {{ loading ? "解析中…" : "选择文件" }}
+        <button class="icon-btn" title="导入数据集" :disabled="busy" @click="chooseFile">
+          <Icon name="plus" :size="16" />
         </button>
-        <button v-if="rows.length" class="btn-ghost text-[12px]" @click="clear">清空</button>
       </div>
-
-      <div v-if="skipped" class="mb-3 text-[12px] text-warn bg-warn/10 border border-warn/30 rounded px-3 py-2">
-        {{ skipped }} 行格式错误（JSONL 不是合法对象 / CSV 记录残缺），已跳过，请核对源文件。
-      </div>
-      <div v-if="largeData" class="mb-3 text-[12px] text-accent bg-accent/10 border border-accent/30 rounded px-3 py-2">
-        数据量较大（{{ rows.length.toLocaleString() }} 条），建议把并发控制在 4~8、超时不低于 180s，先用少量数据试跑一轮再全量。
-        运行结果会实时落盘，中途取消或崩溃都能续跑。
-      </div>
-
-      <div v-if="!rows.length" class="border border-dashed border-ink-700 rounded-lg p-10 text-center">
-        <p class="text-ink-400 text-[13px]">还没有数据</p>
-        <p class="hint mt-2">
-          可以从 Excel / CSV / JSON 导入，也可以直接粘贴表格或 JSON 数组。
-        </p>
-        <p class="hint mt-1">首列或任意列名为「数据组状态」时，分析页会按它做分组统计。</p>
-      </div>
-
-      <div v-if="pasteOpen" class="mt-3 space-y-2">
-        <textarea v-model="pasteText" rows="8" class="field-mono w-full"
-          placeholder="支持：JSON 数组 / 每行一条 JSON / CSV 表头加数据 / 空行分隔的文本块" />
-        <div class="flex items-center gap-2">
-          <select v-model="pasteFormat" class="field w-40">
-            <option value="auto">自动识别</option>
-            <option value="json">JSON</option>
-            <option value="csv">CSV / TSV</option>
-            <option value="text">纯文本块</option>
-          </select>
-          <button class="btn-primary" @click="applyPaste">解析粘贴内容</button>
-          <button class="btn-ghost" @click="pasteOpen = false">取消</button>
+      <div class="px-3 pb-2 shrink-0">
+        <div class="relative">
+          <Icon name="search" :size="14"
+            class="absolute left-2 top-1/2 -translate-y-1/2 text-weak pointer-events-none" />
+          <input v-model="search" class="field pl-7 h-8" placeholder="搜索数据集" />
         </div>
       </div>
-    </div>
-
-    <div v-if="rows.length" class="card p-4">
-      <div class="flex items-center gap-2 mb-2">
-        <span class="text-[13px] font-semibold">列映射</span>
-        <span class="hint">勾选的列会以 <code class="font-mono">&#123;&#123;列名&#125;&#125;</code> 注入用户消息模板</span>
-        <span class="flex-1" />
-        <button class="btn-ghost text-[12px]" @click="state.prompts.userTemplate = state.selectedColumns.map(c => '{{' + c + '}}').join('\n\n')">
-          重新生成模板
+      <div class="flex-1 min-h-0 overflow-y-auto px-2 pb-3 space-y-0.5">
+        <div v-if="!state.datasets.length" class="px-3 py-10 text-center">
+          <p class="text-[13px] text-sub">还没有数据集</p>
+          <p class="hint mt-1.5">支持 CSV / Excel / JSON / 纯文本。</p>
+        </div>
+        <p v-else-if="!filtered.length" class="px-3 py-8 text-center hint">没有匹配的数据集</p>
+        <button
+          v-for="d in filtered"
+          :key="d.id"
+          class="list-item w-full"
+          :class="{ 'list-item-active': d.id === state.activeDatasetId }"
+          @click="state.activeDatasetId = d.id"
+        >
+          <div class="text-[13px] font-medium truncate">{{ d.name }}</div>
+          <div class="mt-0.5 text-[11.5px] text-weak tabular-nums">
+            {{ d.rows.toLocaleString() }} 行 · {{ d.columns.length }} 列
+          </div>
         </button>
       </div>
-      <div class="flex flex-wrap gap-2">
-        <label v-for="c in columns" :key="c"
-          class="flex items-center gap-1.5 px-2 py-1 rounded border cursor-pointer text-[12px] transition"
-          :class="state.selectedColumns.includes(c) ? 'border-accent/50 bg-accent/10 text-ink-200' : 'border-ink-700 text-ink-400 hover:border-ink-600'">
-          <input type="checkbox" class="accent-accent" :checked="state.selectedColumns.includes(c)"
-            :disabled="c === '数据组状态'" @change="toggleColumn(c)" />
-          <span class="font-mono">{{ c }}</span>
-          <span v-if="c === '数据组状态'" class="chip border-warn/40 text-warn bg-warn/10">分组</span>
-        </label>
-      </div>
-    </div>
+    </aside>
 
-    <div v-if="rows.length" class="card overflow-hidden">
-      <div class="flex items-center gap-2 px-4 py-2 border-b border-ink-700/60">
-        <span class="text-[13px] font-semibold">数据预览</span>
-        <span class="hint">共 {{ rows.length }} 条</span>
-        <span class="flex-1" />
-        <span v-if="statusCol" class="chip border-pass/40 text-pass bg-pass/10">识别到分组列</span>
-        <span v-else class="chip border-ink-700 text-ink-400">无分组列</span>
+    <section class="flex-1 min-w-0 flex flex-col bg-panel">
+      <template v-if="active">
+        <div class="h-14 px-5 flex items-center gap-2.5 border-b border-line shrink-0">
+          <input
+            ref="nameInput"
+            v-model="nameDraft"
+            class="min-w-0 w-[240px] h-8 px-1.5 rounded border border-transparent bg-transparent
+              text-[15px] font-semibold text-main hover:border-line focus:border-accent transition-colors"
+            placeholder="数据集名称"
+            @blur="commitName"
+            @keydown.enter.prevent="$event.target.blur()"
+            @keydown.esc="nameDraft = active.name; $event.target.blur()"
+          />
+          <span class="text-[11.5px] text-weak shrink-0">
+            {{ usedBy.length ? `被 ${usedBy.length} 个方案使用` : "暂无方案使用" }}
+          </span>
+          <span class="flex-1" />
+          <button class="btn btn-sm" @click="pasteOpen = !pasteOpen">粘贴数据</button>
+          <button class="btn-primary btn-sm" :disabled="busy" @click="chooseFile">
+            {{ busy ? "处理中…" : "导入文件" }}
+          </button>
+          <div class="relative">
+            <button class="icon-btn" title="更多操作" @click.stop="openMenu">
+              <Icon name="more" :size="16" />
+            </button>
+            <div
+              v-if="menuId"
+              class="absolute right-0 top-8 z-20 w-28 py-1 rounded border border-line bg-panel shadow-sm"
+              @click.stop
+            >
+              <button class="w-full text-left px-3 h-7 text-[12.5px] hover:bg-wash" @click="replace">
+                替换数据
+              </button>
+              <button class="w-full text-left px-3 h-7 text-[12.5px] text-fail hover:bg-fail/10" @click="remove">
+                删除数据集
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="pasteOpen" class="shrink-0 px-5 py-3 border-b border-line bg-page space-y-2">
+          <div class="flex items-center gap-2">
+            <input v-model="pasteName" class="field w-52" placeholder="名称（留空为「粘贴数据」）" />
+            <select v-model="pasteFormat" class="field w-36">
+              <option value="auto">自动识别</option>
+              <option value="json">JSON</option>
+              <option value="csv">CSV / TSV</option>
+              <option value="text">纯文本块</option>
+            </select>
+            <span class="flex-1" />
+            <button class="btn-ghost btn-sm" @click="pasteOpen = false">取消</button>
+            <button class="btn-primary btn-sm" :disabled="busy" @click="submitPaste">
+              {{ busy ? "解析中…" : "导入" }}
+            </button>
+          </div>
+          <textarea
+            v-model="pasteText"
+            rows="6"
+            class="field-mono"
+            placeholder="JSON 数组 / 每行一个 JSON / CSV 表头加数据 / 空行分隔的文本块"
+          />
+        </div>
+
+        <div class="shrink-0 px-5 py-3 border-b border-line">
+          <div class="flex items-center gap-3 text-[12px] text-sub flex-wrap">
+            <span class="tabular-nums">{{ total.toLocaleString() }} 行 · {{ columns.length }} 列</span>
+            <span v-if="active.source" class="text-weak truncate max-w-[320px]">来源 {{ active.source }}</span>
+            <span v-if="preview.skipped" class="text-warn">跳过 {{ preview.skipped }} 行坏数据</span>
+            <span v-if="statusCol" class="chip text-pass border-pass/30">有分组列</span>
+            <span class="flex-1" />
+          </div>
+          <div class="mt-2 flex flex-wrap gap-1.5 max-h-[52px] overflow-y-auto">
+            <span v-for="c in columns" :key="c" class="chip font-mono">
+              {{ c }}
+              <span v-if="c === '数据组状态'" class="text-warn">分组</span>
+            </span>
+          </div>
+        </div>
+
+        <div v-if="large" class="shrink-0 px-5 py-2 border-b border-line text-[12px] text-warn bg-warn/5">
+          数据量较大（{{ total.toLocaleString() }} 行）。建议并发 4–8、超时不低于 180 秒，先用少量数据试跑。
+        </div>
+
+        <div class="flex-1 min-h-0 overflow-auto">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th class="w-12 text-right pr-3">#</th>
+                <th v-for="c in columns" :key="c">{{ c }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(r, i) in rows" :key="offset + i">
+                <td class="text-right pr-3 text-weak tabular-nums">{{ offset + i + 1 }}</td>
+                <td v-for="c in columns" :key="c" class="font-mono text-[12px]">
+                  <span :title="String(r[c] ?? '')">{{ sample(r[c]) }}</span>
+                </td>
+              </tr>
+              <tr v-if="!rows.length && preview.loading">
+                <td :colspan="columns.length + 1" class="text-center text-weak py-10">读取中…</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <Pager
+          :total="total"
+          :page="page"
+          :page-size="pageSize"
+          @update:page="loadPage"
+          @update:page-size="onPageSize"
+        />
+      </template>
+
+      <div v-else class="flex-1 flex flex-col items-center justify-center gap-2">
+        <p class="text-[13px] text-sub">还没有选择数据集</p>
+        <p class="hint">导入一份 CSV、Excel 或 JSON，方案会引用它来逐行评测。</p>
+        <div class="flex items-center gap-2 mt-2">
+          <button class="btn" @click="pasteOpen = !pasteOpen">粘贴数据</button>
+          <button class="btn-primary" :disabled="busy" @click="chooseFile">导入文件</button>
+        </div>
       </div>
-      <div class="overflow-auto max-h-[420px]">
-        <table class="w-full text-[12px]">
-          <thead class="sticky top-0 bg-ink-850 text-ink-400">
-            <tr>
-              <th class="px-3 py-2 text-left font-medium w-10">#</th>
-              <th v-for="c in columns" :key="c" class="px-3 py-2 text-left font-medium whitespace-nowrap">{{ c }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="(r, i) in pagedRows" :key="startNo + i" class="border-t border-ink-800 hover:bg-ink-850/60">
-              <td class="px-3 py-1.5 text-ink-500">{{ startNo + i + 1 }}</td>
-              <td v-for="c in columns" :key="c" class="px-3 py-1.5 text-ink-300 align-top">
-                <span class="font-mono">{{ sample(r, c) }}</span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <Pager :total="rows.length" :page="page" :page-size="pageSize"
-        @update:page="page = $event" @update:page-size="onPageSize" />
-    </div>
+    </section>
   </div>
 </template>

@@ -14,6 +14,8 @@ src-tauri/gen/android/
 *.dmg
 *.app
 *.lnk
+# 本机开发启动辅助
+启动-热更新.bat
 
 # 系统与编辑器
 .DS_Store
