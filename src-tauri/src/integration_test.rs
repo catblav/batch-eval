@@ -98,7 +98,7 @@ mod dataset_tests {
 #[cfg(test)]
 mod var_injection {
     use crate::api::ApiProfile;
-    use crate::run_store::PromptSnapshot;
+    use crate::run_store::{InjectConfig, InjectSlot, PromptSnapshot};
     use crate::runner::RunConfig;
 
     fn profile() -> ApiProfile {
@@ -126,10 +126,31 @@ mod var_injection {
             plan_id: "p-test".into(),
             plan_name: "集成方案".into(),
             prompts: PromptSnapshot {
-                // 主体提示词与用户消息都引用数据列
-                system_prompt: "模式：{{mode}}\n<<<RULES>>>\n{{rules}}\n<<<END>>>".into(),
-                user_template: "{{content}}".into(),
+                // 主体提示词：只描述角色，不引用数据列
+                system_prompt: "你是一个数据整理助手。".into(),
                 eval_prompt: "【给裁判的输入】\n{{input}}\n【被测输出】\n{{output}}".into(),
+                injections: InjectConfig {
+                    // 被测 system 槽位：主体提示词本体 + 数据模板（引用 mode/rules 列）
+                    target_system: InjectSlot {
+                        enabled: true,
+                        text: "模式：{{mode}}\n<<<RULES>>>\n{{rules}}\n<<<END>>>".into(),
+                        prompt_in: true,
+                        ..Default::default()
+                    },
+                    // 被测 user 槽位：数据模板引用 content 列 → 数据单独发 user
+                    target_user: InjectSlot {
+                        enabled: true,
+                        text: "{{content}}".into(),
+                        ..Default::default()
+                    },
+                    // 评测提示词本体放评测 user，并勾选被测数据导入（input/output 渲染）
+                    judge_user: InjectSlot {
+                        prompt_in: true,
+                        data_in: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
             },
             dataset_id: "d-test".into(),
             dataset_name: "集成数据".into(),
@@ -147,21 +168,24 @@ mod var_injection {
 
         let res = crate::runner::run_one_for_test(&cfg, &row).await.expect("应有结果");
 
-        // 1) 被测模型收到的 system：变量已替换，无残留占位符
+        // 1) 被测模型收到的 system：变量已替换为「===== 列名 =====」标题段，无残留占位符
         let out = &res.output;
-        assert!(out.contains("模式：strict"), "system 未注入 mode：{out}");
+        assert!(out.contains("===== mode ====="), "system 未注入 mode 标题：{out}");
+        assert!(out.contains("strict"), "system 未注入 mode 值：{out}");
         assert!(out.contains("- 规则甲"), "system 未注入 rules：{out}");
         assert!(!out.contains("{{mode}}"), "system 残留占位符：{out}");
         assert!(!out.contains("{{rules}}"), "system 残留占位符：{out}");
 
-        // 2) 被测模型收到的 user：变量已替换
+        // 2) 被测模型收到的 user：纯数据槽位带标题、整体括号包裹
+        assert!(out.contains("===== content ====="), "user 未注入 content 标题：{out}");
         assert!(out.contains("原始经历文本"), "user 未注入 content：{out}");
+        assert!(out.contains("(===== content =====\n\n原始经历文本)"), "user 数据块应每列括号包裹：{out}");
         assert!(!out.contains("{{content}}"), "user 残留占位符：{out}");
 
         // 3) 裁判收到的内容：含渲染后的主体提示词 + 用户消息 + 被测输出
         let j = &res.judge_raw;
         assert!(j.contains("【被评估模型的提示词】"), "裁判缺提示词段：{j}");
-        assert!(j.contains("模式：strict"), "裁判看到的提示词未渲染：{j}");
+        assert!(j.contains("===== mode ====="), "裁判看到的提示词未渲染：{j}");
         assert!(j.contains("- 规则甲"), "裁判看到的提示词未渲染：{j}");
         assert!(j.contains("原始经历文本"), "裁判缺用户消息：{j}");
         assert!(j.contains("[SYSTEM]"), "裁判缺被测输出：{j}");

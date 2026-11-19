@@ -106,6 +106,9 @@ pub struct ReportRow {
     pub details: String,
     #[serde(default)]
     pub output: String,
+    /// 被测模型实际收到的 system 消息（渲染后）
+    #[serde(default)]
+    pub system: String,
     #[serde(default)]
     pub input: String,
     #[serde(default)]
@@ -591,11 +594,11 @@ fn write_rows(ws: &mut Worksheet, p: &ReportPayload) -> Result<(), String> {
     ws.set_screen_gridlines(false);
 
     let headers = [
-        "序号", "结果", "数据组", "分类", "原因", "细节", "被测模型输出", "用户消息",
+        "序号", "结果", "数据组", "分类", "原因", "细节", "被测模型输出", "system", "user",
         "被测耗时(s)", "评测耗时(s)", "输入tokens", "输出tokens", "调用错误", "评测原始输出",
     ];
     let widths = [
-        7.0, 9.0, 14.0, 20.0, 40.0, 30.0, 45.0, 40.0, 12.0, 12.0, 11.0, 11.0, 30.0, 40.0,
+        7.0, 9.0, 14.0, 20.0, 40.0, 30.0, 45.0, 40.0, 40.0, 12.0, 12.0, 11.0, 11.0, 30.0, 40.0,
     ];
     let mut r = write_table_head(ws, 0, &headers, &widths, true)?;
     let last_col = (headers.len() - 1) as u16;
@@ -618,29 +621,30 @@ fn write_rows(ws: &mut Worksheet, p: &ReportPayload) -> Result<(), String> {
             (4, &row.reasons),
             (5, &row.details),
             (6, &row.output),
-            (7, &row.input),
+            (7, &row.system),
+            (8, &row.input),
         ] {
             // Format 实现的是消费式 setter，循环里要逐个 clone
             ws.write_string_with_format(r, col, clip(text), &base.clone().set_text_wrap())
                 .map_err(|e| e.to_string())?;
         }
-        ws.write_string_with_format(r, 8, latency_text(row.target_latency_ms), &num_fmt())
+        ws.write_string_with_format(r, 9, latency_text(row.target_latency_ms), &num_fmt())
             .map_err(|e| e.to_string())?;
-        ws.write_string_with_format(r, 9, latency_text(row.judge_latency_ms), &num_fmt())
+        ws.write_string_with_format(r, 10, latency_text(row.judge_latency_ms), &num_fmt())
             .map_err(|e| e.to_string())?;
         match row.prompt_tokens {
-            Some(v) => ws.write_number_with_format(r, 10, v as f64, &num_fmt()),
-            None => ws.write_string_with_format(r, 10, "—", &num_fmt()),
-        }
-        .map_err(|e| e.to_string())?;
-        match row.completion_tokens {
             Some(v) => ws.write_number_with_format(r, 11, v as f64, &num_fmt()),
             None => ws.write_string_with_format(r, 11, "—", &num_fmt()),
         }
         .map_err(|e| e.to_string())?;
-        ws.write_string_with_format(r, 12, clip(&row.target_error), &wrap_fmt())
+        match row.completion_tokens {
+            Some(v) => ws.write_number_with_format(r, 12, v as f64, &num_fmt()),
+            None => ws.write_string_with_format(r, 12, "—", &num_fmt()),
+        }
+        .map_err(|e| e.to_string())?;
+        ws.write_string_with_format(r, 13, clip(&row.target_error), &wrap_fmt())
             .map_err(|e| e.to_string())?;
-        ws.write_string_with_format(r, 13, clip(&row.judge_raw), &wrap_fmt())
+        ws.write_string_with_format(r, 14, clip(&row.judge_raw), &wrap_fmt())
             .map_err(|e| e.to_string())?;
 
         // 长文本行给固定高度，避免整页撑成几万像素；具体内容在单元格内换行可看
@@ -677,6 +681,10 @@ pub async fn export_excel_report(path: String, payload: ReportPayload) -> Result
             .set_author("黑猫-自动评测台"),
     );
 
+    // 固定导出目录可能刚被清掉或换盘，写之前保证父目录存在
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建导出目录失败：{e}"))?;
+    }
     wb.save(&path)
         .map_err(|e| format!("保存报告失败：{e}"))?;
     Ok(())

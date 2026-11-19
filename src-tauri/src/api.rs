@@ -138,17 +138,26 @@ pub fn fit_context(p: &ApiProfile, system: &str, user: &str) -> (String, String,
 
 fn build_body(p: &ApiProfile, system: &str, user: &str) -> Value {
     let mut body = if p.protocol == "anthropic" {
+        // Anthropic 要求 messages 非空且 content 非空：user 为空时用 system 兜底
+        let content = if user.trim().is_empty() { system } else { user };
         json!({
             "model": p.model,
             "max_tokens": p.max_tokens.unwrap_or(2048),
-            "messages": [{ "role": "user", "content": user }],
+            "messages": [{ "role": "user", "content": content }],
         })
     } else {
         let mut msgs = Vec::new();
         if !system.trim().is_empty() {
             msgs.push(json!({ "role": "system", "content": system }));
         }
-        msgs.push(json!({ "role": "user", "content": user }));
+        // 注入 system 模式下没有 user 内容，不再发空 user 消息
+        if !user.trim().is_empty() {
+            msgs.push(json!({ "role": "user", "content": user }));
+        }
+        // 保底：system 也为空时仍发一条 user，保证 messages 非空
+        if msgs.is_empty() {
+            msgs.push(json!({ "role": "user", "content": user }));
+        }
         json!({
             "model": p.model,
             "messages": msgs,

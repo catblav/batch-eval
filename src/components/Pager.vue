@@ -33,12 +33,14 @@ function goJump() {
 <template>
   <div
     v-if="total"
-    class="flex items-center gap-1.5 px-4 py-2 border-t border-line text-[12px] text-sub flex-wrap shrink-0"
+    class="flex items-center gap-2 px-2.5 py-2 border-t border-line/60 bg-wash/30
+      text-[12px] text-sub flex-wrap shrink-0"
   >
     <span class="tabular-nums">共 {{ total }} 条 · {{ rangeStart }}–{{ rangeEnd }}</span>
     <span class="flex-1" />
+    <!-- 宽度要按最长选项「200 条/页」给够，否则文字被下拉箭头挤掉 -->
     <select
-      class="field w-[92px] !h-7 text-[12px]"
+      class="field w-[108px] !px-2 text-[12px]"
       title="每页条数"
       :value="pageSize"
       @change="emit('update:pageSize', Number($event.target.value))"
@@ -52,12 +54,13 @@ function goJump() {
     <button class="icon-btn" :disabled="cur >= pageCount" title="下一页" @click="go(cur + 1)">
       <Icon name="chevron-right" :size="15" />
     </button>
+    <!-- number 输入框自带上下箭头，宽度得留出它那一份，否则「跳页」两字被截 -->
     <input
       v-model="jump"
       type="number"
       min="1"
       :max="pageCount"
-      class="field w-14 !h-7 text-[12px]"
+      class="field w-[80px] !px-2 text-[12px]"
       placeholder="跳页"
       @keyup.enter="goJump"
     />

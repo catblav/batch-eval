@@ -11,10 +11,14 @@ import {
   planById,
   savedText,
   jsonObjectError,
+  toggleList,
 } from "../store";
 import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
 import Icon from "./Icon.vue";
+import EmptyState from "./EmptyState.vue";
+import SplitAside from "./SplitAside.vue";
+import NameInput from "./NameInput.vue";
 
 const search = ref("");
 const menuId = ref("");
@@ -191,14 +195,17 @@ onBeforeUnmount(() => window.removeEventListener("click", closeMenu));
 </script>
 
 <template>
-  <div class="h-full flex bg-page">
-    <aside class="w-[280px] shrink-0 flex flex-col border-r border-line min-h-0">
-      <div class="h-14 px-4 flex items-center gap-2 shrink-0">
-        <h1 class="text-[15px] font-semibold">API 配置</h1>
+  <div class="h-full flex card">
+    <SplitAside>
+      <div class="h-14 px-2.5 flex items-center gap-2 shrink-0">
+        <h1 class="page-title">API 配置</h1>
         <span class="text-[12px] text-weak tabular-nums">{{ state.connections.length }}</span>
         <span class="flex-1" />
         <button class="icon-btn" title="新建连接" @click="create">
           <Icon name="plus" :size="16" />
+        </button>
+        <button class="icon-btn" title="收起列表" @click="toggleList">
+          <Icon name="chevron-left" :size="15" />
         </button>
       </div>
       <div class="px-3 pb-2 shrink-0">
@@ -209,11 +216,18 @@ onBeforeUnmount(() => window.removeEventListener("click", closeMenu));
         </div>
       </div>
       <div class="flex-1 min-h-0 overflow-y-auto px-2 pb-3 space-y-0.5">
-        <div v-if="!state.connections.length" class="px-3 py-10 text-center">
-          <p class="text-[13px] text-sub">还没有连接</p>
-          <p class="hint mt-1.5">新建一条，或从模板填入。</p>
-          <button class="btn-primary btn-sm mt-3" @click="create">新建连接</button>
-        </div>
+        <EmptyState
+          v-if="!state.connections.length"
+          size="sm"
+          icon="plug"
+          title="还没有连接"
+          hint="新建一条，或从模板填入。"
+        >
+          <button class="btn-primary btn-sm" @click="create">
+            <Icon name="plus" :size="13" />
+            新建连接
+          </button>
+        </EmptyState>
         <p v-else-if="!filtered.length" class="px-3 py-8 text-center hint">没有匹配的连接</p>
 
         <div v-for="c in filtered" :key="c.id" class="relative group">
@@ -225,7 +239,7 @@ onBeforeUnmount(() => window.removeEventListener("click", closeMenu));
             <div class="flex items-center gap-2 pr-7">
               <span class="text-[13px] font-medium truncate">{{ c.name }}</span>
               <span v-if="state.plans.some((p) => p.targetId === c.id || p.judgeId === c.id)"
-                class="text-[10.5px] text-pass border border-pass/30 bg-pass/10 rounded px-1 py-px shrink-0">使用中</span>
+                class="chip-pass !h-5 !px-1.5 text-[10.5px] shrink-0">使用中</span>
             </div>
             <div class="mt-0.5 text-[11.5px] text-weak truncate">
               {{ c.protocol === "anthropic" ? "Anthropic" : "OpenAI" }} · {{ c.model || "未填模型" }}
@@ -249,18 +263,16 @@ onBeforeUnmount(() => window.removeEventListener("click", closeMenu));
           </div>
         </div>
       </div>
-    </aside>
+    </SplitAside>
 
     <section class="flex-1 min-w-0 flex flex-col bg-panel">
       <template v-if="active">
-        <div class="h-14 px-5 flex items-center gap-2.5 border-b border-line shrink-0">
-          <input
-            ref="nameInput"
-            v-model="active.name"
-            class="min-w-0 w-[240px] h-8 px-1.5 rounded border border-transparent bg-transparent
-              text-[15px] font-semibold text-main hover:border-line focus:border-accent transition-colors"
-            placeholder="连接名称"
-          />
+        <div class="h-14 px-2.5 flex items-center gap-2.5 border-b border-line/60 shrink-0">
+          <button v-if="state.listCollapsed" class="icon-btn shrink-0" title="展开列表"
+            @click="toggleList">
+            <Icon name="chevron-right" :size="15" />
+          </button>
+          <NameInput ref="nameInput" v-model="active.name" placeholder="连接名称" />
           <span class="text-[11.5px] text-weak shrink-0">{{ savedText }}</span>
           <span class="flex-1" />
           <select class="field w-[104px] h-7 text-[12px] text-sub" value=""
@@ -272,10 +284,12 @@ onBeforeUnmount(() => window.removeEventListener("click", closeMenu));
             <option value="anthropic">Anthropic</option>
             <option value="local">本地</option>
           </select>
-          <button class="btn btn-sm" :disabled="probing" @click="probe">
+          <button class="btn-blue btn-sm" :disabled="probing" @click="probe">
+            <Icon :name="probing ? 'close' : 'clock'" :size="13" />
             {{ probing ? "测速中…" : "测速" }}
           </button>
-          <button class="btn btn-sm" :disabled="testing" @click="test">
+          <button class="btn-blue btn-sm" :disabled="testing" @click="test">
+            <Icon :name="testing ? 'close' : 'plug'" :size="13" />
             {{ testing ? "测试中…" : "测试连接" }}
           </button>
         </div>
@@ -384,7 +398,7 @@ onBeforeUnmount(() => window.removeEventListener("click", closeMenu));
               </div>
             </div>
 
-            <div v-if="result || probeText" class="rounded border border-line bg-page px-3.5 py-3 space-y-1.5">
+            <div v-if="result || probeText" class="rounded-md border border-line/60 bg-wash/40 px-3 py-3 space-y-1.5">
               <div v-if="result" class="text-[12px] leading-relaxed break-all" :class="resultOk ? 'text-pass' : 'text-fail'">
                 {{ result }}
               </div>
@@ -398,11 +412,17 @@ onBeforeUnmount(() => window.removeEventListener("click", closeMenu));
         </div>
       </template>
 
-      <div v-else class="flex-1 flex flex-col items-center justify-center gap-2">
-        <p class="text-[13px] text-sub">连接库还是空的</p>
-        <p class="hint">一条连接就是一套 API 地址、密钥和生成参数，可以被多个方案复用。</p>
-        <button class="btn-primary mt-2" @click="create">新建连接</button>
-      </div>
+      <EmptyState
+        v-else
+        icon="plug"
+        title="连接库还是空的"
+        hint="一条连接就是一套 API 地址、密钥和生成参数，可以被多个方案复用。"
+      >
+        <button class="btn-primary" @click="create">
+          <Icon name="plus" :size="14" />
+          新建连接
+        </button>
+      </EmptyState>
     </section>
   </div>
 </template>

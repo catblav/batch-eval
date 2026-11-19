@@ -28,23 +28,54 @@ pub const STATUS_CANCELLED: &str = "cancelled";
 pub const STATUS_FAILED: &str = "failed";
 pub const STATUS_INTERRUPTED: &str = "interrupted";
 
-/// 自动清理时保留多少个已结束任务；运行中 / 中断任务不自动删
-pub const MAX_FINISHED_RUNS: usize = 10;
-
 /// 与前端 EXCLUDED_CATEGORIES 保持同一口径
 pub const TARGET_FAIL: &str = "被测模型调用失败";
 pub const JUDGE_FAIL: &str = "评测模型调用失败";
 
+/// 一个数据注入槽位：勾选启用 + 数据模板文本（可写引导语 + {{列}}）。
+/// 评测侧还有 prompt_in（评测提示词本体是否发到该槽位）与 data_in
+/// （被测数据 {{input}}/{{output}} 是否在该槽位渲染；不勾则保留字面花括号）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InjectSlot {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub text: String,
+    /// 评测提示词本体是否发到该槽位
+    #[serde(default)]
+    pub prompt_in: bool,
+    /// 被测数据（{{input}}/{{output}}）是否在该槽位渲染
+    #[serde(default)]
+    pub data_in: bool,
+}
+
+/// 四个消息槽位的数据注入配置：被测 system / 被测 user / 评测 system / 评测 user
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InjectConfig {
+    #[serde(default)]
+    pub target_system: InjectSlot,
+    #[serde(default)]
+    pub target_user: InjectSlot,
+    #[serde(default)]
+    pub judge_system: InjectSlot,
+    #[serde(default)]
+    pub judge_user: InjectSlot,
+}
+
 /// 启动任务时对方案三份提示词的快照，重跑失败项前用它判断方案是否改过。
+/// injections 是四个消息槽位的数据注入配置：评测提示词本体与被测数据的去向都由它决定。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptSnapshot {
     #[serde(default)]
     pub system_prompt: String,
     #[serde(default)]
-    pub user_template: String,
-    #[serde(default)]
     pub eval_prompt: String,
+    /// 四个消息槽位的数据注入配置
+    #[serde(default)]
+    pub injections: InjectConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -91,7 +122,7 @@ fn is_excluded(r: &RowResult) -> bool {
 #[serde(rename_all = "camelCase")]
 pub struct RunMeta {
     pub run_id: String,
-    /// 任务名称，默认由「方案名 · 日期」生成
+    /// 任务名称，由前端按「方案名 · 后缀 · 第N版」拼好传入
     #[serde(default)]
     pub title: String,
     #[serde(default)]
@@ -190,7 +221,7 @@ pub fn now_ms() -> u64 {
 }
 
 pub fn runs_root(app: &tauri::AppHandle) -> PathBuf {
-    crate::storage::config_dir(app).join("runs")
+    crate::storage::data_dir(app).join("runs")
 }
 
 /// 目录名会被拼进路径，只接受字母数字、下划线、连字符，杜绝 ../ 之类。
@@ -488,12 +519,17 @@ pub fn migrate_legacy_dirs(app: &tauri::AppHandle) -> usize {
     moved
 }
 
-/// 只保留最近 N 个已结束任务；运行中、中断任务不自动删。
-pub fn cleanup_finished(root: &Path) {
+/// 超出保存范围的任务目录路径。`days == 0` 表示永久保存，一律不清理。
+/// 正在跑的任务永不删；中断 / 失败 / 取消同样是记录，按时间一起清。
+fn expired_run_dirs(root: &Path, days: u64) -> Vec<PathBuf> {
+    if days == 0 {
+        return Vec::new();
+    }
+    let cutoff = now_ms().saturating_sub(days.saturating_mul(86_400_000));
     let Ok(rd) = std::fs::read_dir(root) else {
-        return;
+        return Vec::new();
     };
-    let mut finished: Vec<(u64, String, PathBuf)> = Vec::new();
+    let mut out = Vec::new();
     for entry in rd.flatten() {
         let p = entry.path();
         if !p.is_dir() {
@@ -508,17 +544,39 @@ pub fn cleanup_finished(root: &Path) {
         let Ok(Some(meta)) = read_meta(&p) else {
             continue;
         };
-        match meta.status.as_str() {
-            STATUS_RUNNING | STATUS_INTERRUPTED => continue,
-            _ => {}
+        if meta.status == STATUS_RUNNING {
+            continue;
         }
-        let at = meta.finished_at.unwrap_or(meta.started_at);
-        finished.push((at, name, p));
+        if meta.finished_at.unwrap_or(meta.started_at) < cutoff {
+            out.push(p);
+        }
     }
-    finished.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
-    for (_, _, p) in finished.into_iter().skip(MAX_FINISHED_RUNS) {
-        let _ = std::fs::remove_dir_all(&p);
+    out
+}
+
+/// 按保存范围清理，返回清理条数。days 为 0 时不做任何事。
+pub fn cleanup_expired_in(root: &Path, days: u64) -> usize {
+    let dirs = expired_run_dirs(root, days);
+    let mut n = 0;
+    for p in dirs {
+        if std::fs::remove_dir_all(&p).is_ok() {
+            n += 1;
+        }
     }
+    n
+}
+
+/// 保存范围（天），0 = 永久。读不到或非法一律按永久处理，宁可留数据不乱删。
+/// 用同步的 read_raw_settings：启动时的清理跑在 setup 里，没法 await 命令。
+pub fn retention_days(app: &tauri::AppHandle) -> u64 {
+    crate::storage::read_raw_settings(app)
+        .and_then(|v| v.get("retentionDays").and_then(|d| d.as_u64()))
+        .unwrap_or(0)
+}
+
+/// 启动时与每个任务结束后调用：按当前保存范围清理过期记录
+pub fn cleanup_expired(app: &tauri::AppHandle) -> usize {
+    cleanup_expired_in(&runs_root(app), retention_days(app))
 }
 
 // ---------- Tauri 命令 ----------
@@ -551,6 +609,37 @@ pub async fn delete_run(app: tauri::AppHandle, run_id: String) -> Result<(), Str
     Ok(())
 }
 
+/// 改成某个保存范围后会清掉几条，只数不删。给前端的确认弹窗用，
+/// 和真正清理共用同一套判定，避免两边口径走偏。
+#[tauri::command]
+pub async fn preview_retention(app: tauri::AppHandle, days: u64) -> Result<usize, String> {
+    Ok(expired_run_dirs(&runs_root(&app), days).len())
+}
+
+/// 立刻按给定保存范围清理一次，返回清理条数。
+#[tauri::command]
+pub async fn apply_retention(app: tauri::AppHandle, days: u64) -> Result<usize, String> {
+    Ok(cleanup_expired_in(&runs_root(&app), days))
+}
+
+/// 清空某个任务的结果：截断结果文件，任务退回「已中断」。
+///
+/// 数据集快照和提示词快照都保留，所以清空后可以直接续跑，等于按当前方案全量重跑。
+#[tauri::command]
+pub async fn clear_run(app: tauri::AppHandle, run_id: String) -> Result<(), String> {
+    let dir = run_dir(&app, &run_id)?;
+    let mut meta = read_meta(&dir)?.ok_or_else(|| "任务不存在".to_string())?;
+    if meta.status == STATUS_RUNNING {
+        return Err("任务正在运行，先取消再清空".into());
+    }
+    std::fs::File::create(results_path(&dir)).map_err(|e| format!("清空结果文件失败：{e}"))?;
+    meta.status = STATUS_INTERRUPTED.to_string();
+    meta.summary = None;
+    meta.error = None;
+    meta.finished_at = None;
+    write_meta(&dir, &meta)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -558,6 +647,7 @@ mod tests {
     fn row(index: usize, output: &str) -> RowResult {
         RowResult {
             index,
+            system: String::new(),
             input: format!("输入{index}"),
             output: output.into(),
             target_error: None,
@@ -711,19 +801,37 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_keeps_finished_and_spares_interrupted() {
+    fn cleanup_drops_only_expired_records() {
         let root = temp_dir("cleanup");
-        for i in 0..12u64 {
-            make_run(&root, &format!("run-{i}"), 100 + i);
-        }
-        let interrupted = root.join("run-broken");
-        reset(&interrupted, &meta("run-broken", 1, STATUS_INTERRUPTED, 1)).unwrap();
-        cleanup_finished(&root);
+        let day = 86_400_000u64;
+        let now = now_ms();
+        // 三天内的新记录
+        make_run(&root, "run-fresh", now - day);
+        // 十天前的旧记录：过期
+        make_run(&root, "run-old", now - 10 * day);
+        // 过期但正在跑：留着
+        let running = root.join("run-running");
+        let mut m = meta("run-running", 1, STATUS_RUNNING, now - 10 * day);
+        m.finished_at = None;
+        reset(&running, &m).unwrap();
+        // 过期且中断：算记录，一起清
+        let broken = root.join("run-broken");
+        reset(&broken, &meta("run-broken", 1, STATUS_INTERRUPTED, now - 10 * day)).unwrap();
+
+        assert_eq!(cleanup_expired_in(&root, 3), 2);
         let list = list_run_entries(&root);
-        assert_eq!(list.len(), MAX_FINISHED_RUNS + 1);
-        assert!(list.iter().any(|e| e.run_id == "run-broken"));
-        assert!(!list.iter().any(|e| e.run_id == "run-0"));
-        assert!(!list.iter().any(|e| e.run_id == "run-1"));
+        assert_eq!(list.len(), 2);
+        assert!(list.iter().any(|e| e.run_id == "run-fresh"));
+        assert!(list.iter().any(|e| e.run_id == "run-running"));
+    }
+
+    #[test]
+    fn cleanup_forever_keeps_everything() {
+        let root = temp_dir("cleanup-forever");
+        let now = now_ms();
+        make_run(&root, "run-old", now - 365 * 86_400_000);
+        assert_eq!(cleanup_expired_in(&root, 0), 0);
+        assert_eq!(list_run_entries(&root).len(), 1);
     }
 
     #[test]

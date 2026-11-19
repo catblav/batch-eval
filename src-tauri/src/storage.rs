@@ -23,6 +23,31 @@ pub fn config_dir(app: &tauri::AppHandle) -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
 }
 
+/// 自定义数据目录的指针文件名。固定放在 `config_dir` 下，避免
+/// 「要先读设置才知道去哪读设置」的鸡生蛋问题。
+const DATA_DIR_POINTER: &str = "data-dir.txt";
+
+/// 解析数据目录：指针文件里写着一行绝对路径就用它，文件缺失、读不出来
+/// 或者只有空白都回退到默认配置目录。抽成纯函数方便用临时目录测。
+pub fn resolve_data_dir(config_dir: &Path) -> PathBuf {
+    let Ok(text) = std::fs::read_to_string(config_dir.join(DATA_DIR_POINTER)) else {
+        return config_dir.to_path_buf();
+    };
+    let s = text.trim();
+    if s.is_empty() {
+        config_dir.to_path_buf()
+    } else {
+        PathBuf::from(s)
+    }
+}
+
+/// 任务记录（`runs/`）和数据集（`datasets/`）存放的根目录。
+/// `settings.json`、`settings.v1.bak`、`dataset.json` 仍留在 `config_dir`，
+/// 这样把数据目录放到共享盘时不会连 API Key 一起带出去。
+pub fn data_dir(app: &tauri::AppHandle) -> PathBuf {
+    resolve_data_dir(&config_dir(app))
+}
+
 /// 旧 identifier 是 `com.batcheval.app`，macOS 上会和 `.app` 扩展名冲突，
 /// 已改成 `com.batcheval.desktop`。改 identifier 会换配置目录，这里把旧目录的
 /// 设置、数据集和运行记录复制到新目录；只补缺失文件，不覆盖、不删除旧目录。
@@ -198,7 +223,7 @@ struct DatasetIndex {
 }
 
 fn datasets_root(app: &tauri::AppHandle) -> PathBuf {
-    config_dir(app).join("datasets")
+    data_dir(app).join("datasets")
 }
 
 fn index_path(app: &tauri::AppHandle) -> PathBuf {
@@ -577,6 +602,308 @@ pub async fn append_text_file(path: String, content: String) -> Result<(), Strin
         .map_err(|e| format!("写入文件失败：{e}"))
 }
 
+// ---------- 数据保存位置 ----------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataDirInfo {
+    current: String,
+    default_dir: String,
+    is_default: bool,
+    exists: bool,
+    runs: usize,
+    datasets: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveReport {
+    runs: usize,
+    datasets: usize,
+}
+
+/// 路径比较。目录可能还不存在，canonicalize 失败时退回字面比较。
+fn same_path(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
+fn count_dirs(dir: &Path) -> usize {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    rd.flatten()
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .count()
+}
+
+/// 数数据集文件，排除索引本身。
+fn count_datasets(dir: &Path) -> usize {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    rd.flatten()
+        .filter(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name.ends_with(".json") && name != "index.json"
+        })
+        .count()
+}
+
+/// 把任务记录和数据集复制到新目录，返回 (复制的任务数, 复制的数据集数)。
+/// 只补缺失、不覆盖、不删源。数据集库整体判定：目标已经有 `index.json`
+/// 就整个跳过，避免复制过去一批文件却不在索引里、界面上看不见。
+pub fn copy_data_to(src: &Path, dst: &Path) -> std::io::Result<(usize, usize)> {
+    let mut runs = 0;
+    let src_runs = src.join("runs");
+    if src_runs.is_dir() {
+        std::fs::create_dir_all(dst.join("runs"))?;
+        for entry in std::fs::read_dir(&src_runs)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let to = dst.join("runs").join(entry.file_name());
+            if to.exists() {
+                continue;
+            }
+            copy_tree_if_missing(&entry.path(), &to)?;
+            runs += 1;
+        }
+    }
+
+    let mut datasets = 0;
+    let src_ds = src.join("datasets");
+    let dst_ds = dst.join("datasets");
+    if src_ds.is_dir() && !dst_ds.join("index.json").exists() {
+        std::fs::create_dir_all(&dst_ds)?;
+        for entry in std::fs::read_dir(&src_ds)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let name = entry.file_name();
+            let to = dst_ds.join(&name);
+            if to.exists() {
+                continue;
+            }
+            std::fs::copy(entry.path(), &to)?;
+            if name.to_string_lossy().ends_with(".json") && name != "index.json" {
+                datasets += 1;
+            }
+        }
+    }
+    Ok((runs, datasets))
+}
+
+/// 当前数据位置、条数，以及它是不是默认位置。给侧栏显示用。
+#[tauri::command]
+pub async fn data_dir_info(app: tauri::AppHandle) -> Result<DataDirInfo, String> {
+    let current = data_dir(&app);
+    let default_dir = config_dir(&app);
+    Ok(DataDirInfo {
+        runs: count_dirs(&current.join("runs")),
+        datasets: count_datasets(&current.join("datasets")),
+        is_default: same_path(&current, &default_dir),
+        exists: current.is_dir(),
+        current: current.to_string_lossy().to_string(),
+        default_dir: default_dir.to_string_lossy().to_string(),
+    })
+}
+
+/// 切换数据保存位置。选默认目录时写空指针文件，等于「用默认位置」。
+#[tauri::command]
+pub async fn set_data_dir(
+    app: tauri::AppHandle,
+    dir: String,
+    move_existing: bool,
+) -> Result<MoveReport, String> {
+    let dir = dir.trim().to_string();
+    if dir.is_empty() {
+        return Err("请选择一个文件夹".into());
+    }
+    let target = PathBuf::from(&dir);
+    std::fs::create_dir_all(&target).map_err(|e| format!("创建目录失败：{e}"))?;
+    // 试写一次，只读目录、没权限的网络盘在这里就拦下来
+    let probe = target.join(".batcheval-write-test");
+    std::fs::write(&probe, b"ok").map_err(|e| format!("这个文件夹不能写入：{e}"))?;
+    let _ = std::fs::remove_file(&probe);
+
+    let current = data_dir(&app);
+    let default_dir = config_dir(&app);
+    let mut report = MoveReport {
+        runs: 0,
+        datasets: 0,
+    };
+    if move_existing && !same_path(&current, &target) {
+        let (runs, datasets) =
+            copy_data_to(&current, &target).map_err(|e| format!("复制已有数据失败：{e}"))?;
+        report = MoveReport { runs, datasets };
+    }
+
+    let value = if same_path(&target, &default_dir) {
+        ""
+    } else {
+        dir.as_str()
+    };
+    atomic_write(&default_dir.join(DATA_DIR_POINTER), value.as_bytes())?;
+    Ok(report)
+}
+
+/// 在系统文件管理器里打开目录。
+fn open_in_file_manager(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("创建目录失败：{e}"))?;
+    let path = dir.to_string_lossy().to_string();
+    #[cfg(target_os = "windows")]
+    let spawned = std::process::Command::new("explorer").arg(&path).spawn();
+    #[cfg(target_os = "macos")]
+    let spawned = std::process::Command::new("open").arg(&path).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let spawned = std::process::Command::new("xdg-open").arg(&path).spawn();
+    spawned
+        .map(|_| ())
+        .map_err(|e| format!("打开文件夹失败：{e}"))
+}
+
+/// 在系统文件管理器里打开当前数据目录。
+#[tauri::command]
+pub async fn open_data_dir(app: tauri::AppHandle) -> Result<(), String> {
+    open_in_file_manager(&data_dir(&app))
+}
+
+// ---------- 报告导出位置 ----------
+
+/// 固定导出目录的指针文件，和数据目录一样放在 `config_dir` 下。
+/// 文件缺失或内容为空表示「没设置」，导出时仍然弹保存对话框。
+const EXPORT_DIR_POINTER: &str = "export-dir.txt";
+
+pub fn resolve_export_dir(config_dir: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(config_dir.join(EXPORT_DIR_POINTER)).ok()?;
+    let s = text.trim();
+    if s.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(s))
+    }
+}
+
+pub fn export_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
+    resolve_export_dir(&config_dir(app))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportDirInfo {
+    /// 没设置时为空字符串
+    current: String,
+    set: bool,
+    exists: bool,
+}
+
+fn export_dir_info_of(config_dir: &Path) -> ExportDirInfo {
+    match resolve_export_dir(config_dir) {
+        Some(dir) => ExportDirInfo {
+            exists: dir.is_dir(),
+            set: true,
+            current: dir.to_string_lossy().to_string(),
+        },
+        None => ExportDirInfo {
+            current: String::new(),
+            set: false,
+            exists: false,
+        },
+    }
+}
+
+#[tauri::command]
+pub async fn export_dir_info(app: tauri::AppHandle) -> Result<ExportDirInfo, String> {
+    Ok(export_dir_info_of(&config_dir(&app)))
+}
+
+/// 设置固定导出目录；传空字符串等于恢复「每次导出弹保存框」。
+#[tauri::command]
+pub async fn set_export_dir(app: tauri::AppHandle, dir: String) -> Result<ExportDirInfo, String> {
+    let config = config_dir(&app);
+    let dir = dir.trim().to_string();
+    let value = if dir.is_empty() {
+        String::new()
+    } else {
+        let target = PathBuf::from(&dir);
+        std::fs::create_dir_all(&target).map_err(|e| format!("创建目录失败：{e}"))?;
+        // 试写一次，只读目录、没权限的网络盘在这里就拦下来
+        let probe = target.join(".batcheval-write-test");
+        std::fs::write(&probe, b"ok").map_err(|e| format!("这个文件夹不能写入：{e}"))?;
+        let _ = std::fs::remove_file(&probe);
+        dir
+    };
+    atomic_write(&config.join(EXPORT_DIR_POINTER), value.as_bytes())?;
+    Ok(export_dir_info_of(&config))
+}
+
+/// 同名文件已存在时追加 `_2`、`_3`，避免固定目录里同分钟多次导出互相覆盖。
+fn unique_file_path(path: PathBuf) -> PathBuf {
+    if !path.exists() {
+        return path;
+    }
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "export".into());
+    let ext = path
+        .extension()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let Some(parent) = path.parent() else {
+        return path;
+    };
+    for i in 2..1000 {
+        let name = if ext.is_empty() {
+            format!("{stem}_{i}")
+        } else {
+            format!("{stem}_{i}.{ext}")
+        };
+        let candidate = parent.join(name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    path
+}
+
+/// 导出落盘路径：设置了固定目录就返回该目录下的去重文件名，
+/// 否则返回 None，前端继续弹保存对话框。
+#[tauri::command]
+pub async fn export_file_path(
+    app: tauri::AppHandle,
+    file_name: String,
+) -> Result<Option<String>, String> {
+    let Some(dir) = export_dir(&app) else {
+        return Ok(None);
+    };
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建导出目录失败：{e}"))?;
+    // 只取文件名部分，防止前端传入路径穿越
+    let name = Path::new(&file_name)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| "导出文件名不合法".to_string())?;
+    Ok(Some(
+        unique_file_path(dir.join(name)).to_string_lossy().to_string(),
+    ))
+}
+
+/// 在系统文件管理器里打开固定导出目录。
+#[tauri::command]
+pub async fn open_export_dir(app: tauri::AppHandle) -> Result<(), String> {
+    let Some(dir) = export_dir(&app) else {
+        return Err("还没有设置导出文件夹".into());
+    };
+    open_in_file_manager(&dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,6 +948,161 @@ mod tests {
             std::fs::read_to_string(dst.join("datasets/index.json")).unwrap(),
             "idx"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn temp_root(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("batch-eval-storage-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn data_dir_defaults_to_config_dir() {
+        let root = temp_root("datadir-default");
+        assert_eq!(resolve_data_dir(&root), root);
+        // 只有空白也算没设置
+        std::fs::write(root.join(DATA_DIR_POINTER), "  \n").unwrap();
+        assert_eq!(resolve_data_dir(&root), root);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn data_dir_follows_pointer_file() {
+        let root = temp_root("datadir-pointer");
+        let custom = root.join("自定义 数据目录");
+        std::fs::write(root.join(DATA_DIR_POINTER), format!("{}\n", custom.display())).unwrap();
+        assert_eq!(resolve_data_dir(&root), custom);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn copy_data_copies_runs_and_datasets() {
+        let root = temp_root("copydata");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::create_dir_all(src.join("runs/run-a")).unwrap();
+        std::fs::create_dir_all(src.join("runs/run-b")).unwrap();
+        std::fs::create_dir_all(src.join("datasets")).unwrap();
+        std::fs::write(src.join("runs/run-a/meta.json"), "a").unwrap();
+        std::fs::write(src.join("runs/run-b/meta.json"), "b").unwrap();
+        std::fs::write(src.join("datasets/index.json"), "idx").unwrap();
+        std::fs::write(src.join("datasets/ds-1.json"), "one").unwrap();
+        std::fs::write(src.join("datasets/ds-2.json"), "two").unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+
+        let (runs, datasets) = copy_data_to(&src, &dst).unwrap();
+        assert_eq!((runs, datasets), (2, 2));
+        assert_eq!(
+            std::fs::read_to_string(dst.join("runs/run-a/meta.json")).unwrap(),
+            "a"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst.join("datasets/index.json")).unwrap(),
+            "idx"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst.join("datasets/ds-1.json")).unwrap(),
+            "one"
+        );
+        // 源目录不删
+        assert!(src.join("runs/run-a/meta.json").exists());
+
+        // 目标已经有数据集索引时整个跳过，避免复制过去却不在索引里
+        let dst2 = root.join("dst2");
+        std::fs::create_dir_all(dst2.join("datasets")).unwrap();
+        std::fs::write(dst2.join("datasets/index.json"), "other").unwrap();
+        let (runs2, datasets2) = copy_data_to(&src, &dst2).unwrap();
+        assert_eq!((runs2, datasets2), (2, 0));
+        assert_eq!(
+            std::fs::read_to_string(dst2.join("datasets/index.json")).unwrap(),
+            "other"
+        );
+        assert!(!dst2.join("datasets/ds-1.json").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn copy_data_skips_existing_runs() {
+        let root = temp_root("copydata-skip");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::create_dir_all(src.join("runs/run-a")).unwrap();
+        std::fs::write(src.join("runs/run-a/meta.json"), "new").unwrap();
+        std::fs::create_dir_all(dst.join("runs/run-a")).unwrap();
+        std::fs::write(dst.join("runs/run-a/meta.json"), "keep").unwrap();
+
+        let (runs, _) = copy_data_to(&src, &dst).unwrap();
+        assert_eq!(runs, 0);
+        assert_eq!(
+            std::fs::read_to_string(dst.join("runs/run-a/meta.json")).unwrap(),
+            "keep"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn counts_only_real_runs_and_datasets() {
+        let root = temp_root("counts");
+        std::fs::create_dir_all(root.join("runs/run-a")).unwrap();
+        std::fs::create_dir_all(root.join("runs/run-b")).unwrap();
+        std::fs::write(root.join("runs/notes.txt"), "x").unwrap();
+        std::fs::create_dir_all(root.join("datasets")).unwrap();
+        std::fs::write(root.join("datasets/index.json"), "idx").unwrap();
+        std::fs::write(root.join("datasets/ds-1.json"), "one").unwrap();
+        std::fs::write(root.join("datasets/readme.md"), "x").unwrap();
+
+        assert_eq!(count_dirs(&root.join("runs")), 2);
+        assert_eq!(count_datasets(&root.join("datasets")), 1);
+        assert_eq!(count_dirs(&root.join("nope")), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn export_dir_is_unset_until_pointer_written() {
+        let root = temp_root("exportdir");
+        assert_eq!(resolve_export_dir(&root), None);
+        std::fs::write(root.join(EXPORT_DIR_POINTER), "  \n").unwrap();
+        assert_eq!(resolve_export_dir(&root), None);
+        let custom = root.join("导出 报告");
+        std::fs::write(root.join(EXPORT_DIR_POINTER), format!("{}\n", custom.display())).unwrap();
+        assert_eq!(resolve_export_dir(&root), Some(custom));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn export_dir_info_reports_missing_folder() {
+        let root = temp_root("exportdir-info");
+        let gone = root.join("not-there");
+        std::fs::write(
+            root.join(EXPORT_DIR_POINTER),
+            format!("{}\n", gone.display()),
+        )
+        .unwrap();
+        let info = export_dir_info_of(&root);
+        assert!(info.set);
+        assert!(!info.exists);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unique_file_path_avoids_overwrite() {
+        let root = temp_root("unique-path");
+        let first = root.join("评测报告_20261112_1530.xlsx");
+        assert_eq!(unique_file_path(first.clone()), first);
+        std::fs::write(&first, "a").unwrap();
+        let second = unique_file_path(first.clone());
+        assert_eq!(second, root.join("评测报告_20261112_1530_2.xlsx"));
+        std::fs::write(&second, "b").unwrap();
+        assert_eq!(
+            unique_file_path(first),
+            root.join("评测报告_20261112_1530_3.xlsx")
+        );
+        // 没有扩展名也能去重
+        let plain = root.join("导出");
+        std::fs::write(&plain, "x").unwrap();
+        assert_eq!(unique_file_path(plain), root.join("导出_2"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

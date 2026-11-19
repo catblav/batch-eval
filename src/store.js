@@ -4,6 +4,8 @@ import { listen } from "@tauri-apps/api/event";
 import {
   DEFAULT_EVAL_PROMPT,
   DEFAULT_SYSTEM_PROMPT,
+  autoColsBlock,
+  defaultInjectedColumns,
   defaultUserTemplate,
 } from "./defaultPrompts";
 
@@ -55,17 +57,61 @@ export function blankConnection(name = "新连接") {
   return { id: uid("conn"), name, ...blankProfile() };
 }
 
+/// 空数据槽位：enabled = 该槽位是否注入数据，text = 数据模板（引导语 + {{列}}）
+/// promptIn = 评测提示词本体是否发到该槽位，dataIn = 被测数据（{{input}}/{{output}}）是否渲染
+function blankSlot() {
+  return { enabled: false, text: "", promptIn: false, dataIn: false };
+}
+
 export function blankPlan(name, datasetId = "", columns = []) {
+  const cols = defaultInjectedColumns(columns);
   return {
     id: uid("plan"),
     name,
-    systemPrompt: DEFAULT_SYSTEM_PROMPT,
-    userTemplate: defaultUserTemplate(columns),
+    /// 下一版要用的版号，启动任务时 +1；0 表示还没打过标记
+    version: 1,
+    /// 主体提示词末尾自动接上「# 待处理内容 + {{列}}」，数据才渲染得进来
+    systemPrompt: DEFAULT_SYSTEM_PROMPT + autoColsBlock(cols),
     evalPrompt: DEFAULT_EVAL_PROMPT,
+    /// 上面那段自动列块用的列，换数据集时按它定位替换（见 syncAutoCols）
+    autoCols: cols,
     datasetId,
     targetId: "",
     judgeId: "",
+    /// 四槽位数据注入：默认两侧都把提示词本体和数据放 system。
+    /// 被测 system 拿主体提示词，列声明即自动列块那几列；
+    /// 评测 system 拿评测提示词，被测数据（{{input}}/{{output}}）在这里渲染。
+    /// 两边的 user 槽位默认全不勾，需要时再开。
+    injections: {
+      targetSystem: { enabled: true, text: defaultUserTemplate(columns), promptIn: true, dataIn: false },
+      targetUser: blankSlot(),
+      judgeSystem: { enabled: false, text: "", promptIn: true, dataIn: true },
+      judgeUser: blankSlot(),
+    },
   };
+}
+
+/// 换数据集：把主体提示词末尾那段自动列块换掉。
+/// 只在能定位到上次自动写入的那段时才改；用户改过提示词就原样保留，不去覆盖。
+function syncAutoCols(plan, columns) {
+  const prev = Array.isArray(plan.autoCols) ? plan.autoCols : [];
+  const next = defaultInjectedColumns(columns);
+  if (prev.join("\u0000") === next.join("\u0000")) return;
+  const sp = String(plan.systemPrompt || "");
+  const prevBlock = autoColsBlock(prev);
+  const untouched = prevBlock ? sp.endsWith(prevBlock) : sp === DEFAULT_SYSTEM_PROMPT;
+  if (untouched) {
+    const base = prevBlock ? sp.slice(0, sp.length - prevBlock.length) : sp;
+    plan.systemPrompt = base + autoColsBlock(next);
+  }
+  plan.autoCols = next;
+}
+
+/// 方案换数据集：数据集本身换掉，主体提示词里的自动列块跟着换
+export function setPlanDataset(plan, id) {
+  if (!plan) return;
+  plan.datasetId = id;
+  syncAutoCols(plan, datasetColumnsOf(id));
 }
 
 export const state = reactive({
@@ -74,6 +120,13 @@ export const state = reactive({
   loadError: "",
   page: "run",
   theme: "light",
+  sidebarCollapsed: false,
+  /// 运行页左右两栏的占比：右侧实时明细占多少，左边任务列表拿剩下的
+  liveWidthPct: 0.6,
+  /// API 配置 / 提示词配置 / 数据集这三页左栏的宽度（px）与收起状态。
+  /// 三页共用一份：左栏在它们那儿是同一种东西，切页时宽度跳来跳去反而奇怪
+  listWidthPx: 280,
+  listCollapsed: false,
   toast: { text: "", kind: "info", at: 0 },
   save: { at: 0, saving: false, error: "" },
 
@@ -102,10 +155,32 @@ export const state = reactive({
   },
   runForm: {
     selectedPlanIds: [],
-    titlePrefix: "",
+    titleSuffix: "",
+    /// 勾选后任务名自动带上「第 N 版」，N 按方案各自的版号。
+    /// 记住上次的勾选状态，重启后仍是勾上的，直到手动取消
+    versionEnabled: false,
     concurrency: 4,
     maxRetries: 2,
     launchOpen: false,
+  },
+  /// 标黄的重点任务，存 runId，重启后还在
+  starredRunIds: [],
+  /// 任务记录保存范围（天），0 = 永久保存。超出范围的在启动时和任务结束后自动清理
+  retentionDays: 0,
+  /// 数据保存位置。真相在后端的 data-dir.txt 指针文件里，这里只是给界面显示
+  dataDir: {
+    current: "",
+    defaultDir: "",
+    isDefault: true,
+    exists: true,
+    runs: 0,
+    datasets: 0,
+  },
+  /// 报告导出位置。真相在后端的 export-dir.txt；set 为 false 时导出仍弹保存框
+  exportDir: {
+    current: "",
+    set: false,
+    exists: false,
   },
 
   analysis: {
@@ -115,6 +190,14 @@ export const state = reactive({
     badLines: 0,
     dataset: null,
     loading: false,
+    /// 分析页是否跟最新一条：跑完新任务后自动跟，用户手动选过就停下不再跟
+    follow: true,
+    /// 实时模式：选中了运行中的任务时为 true，viewResults 改看 liveResults
+    live: false,
+    /// 实时模式下的结果缓存，run://progress 事件推送合并到这里（不进持久化）
+    liveResults: [],
+    liveDone: 0,
+    liveTotal: 0,
   },
 
   view: {
@@ -124,7 +207,7 @@ export const state = reactive({
     query: "",
     queryApplied: "",
     page: 1,
-    pageSize: 50,
+    pageSize: 10,
     selectedIndex: -1,
   },
 });
@@ -162,6 +245,18 @@ export function applyTheme(theme) {
 
 export function toggleTheme() {
   applyTheme(state.theme === "dark" ? "light" : "dark");
+  scheduleSave();
+}
+
+/// 左栏收起 / 展开，只留一排图标；选择随设置持久化
+export function toggleSidebar() {
+  state.sidebarCollapsed = !state.sidebarCollapsed;
+  scheduleSave();
+}
+
+/// 三个两栏页（API 配置 / 提示词配置 / 数据集）左栏的收起 / 展开
+export function toggleList() {
+  state.listCollapsed = !state.listCollapsed;
   scheduleSave();
 }
 
@@ -434,6 +529,8 @@ export function duplicatePlan(id) {
   const copy = plain(src);
   copy.id = uid("plan");
   copy.name = uniqueName(plain(state.plans).map((p) => p.name), `${src.name} 副本`);
+  // 副本没有自己的运行历史，版号从第 1 版重新算
+  copy.version = 1;
   state.plans.push(copy);
   state.activePlanId = copy.id;
   return copy;
@@ -458,9 +555,10 @@ export function referencedVars(text) {
 export const templateVarCheck = computed(() => {
   const plan = activePlan();
   const cols = datasetColumnsOf(plan?.datasetId);
+  const injTexts = Object.values(plan?.injections || {}).map((s) => s?.text || "");
   const used = new Set([
     ...referencedVars(plan?.systemPrompt),
-    ...referencedVars(plan?.userTemplate),
+    ...injTexts.flatMap((t) => [...referencedVars(t)]),
   ]);
   const colSet = new Set(cols);
   const missing = cols.filter((c) => !used.has(c));
@@ -469,8 +567,9 @@ export const templateVarCheck = computed(() => {
 });
 
 export function buildUserTemplate(columns) {
-  if (!columns?.length) return "";
-  return columns.map((c) => `{{${c}}}`).join("\n\n");
+  const cols = defaultInjectedColumns(columns);
+  if (!cols.length) return "";
+  return cols.map((c) => `{{${c}}}`).join("\n\n");
 }
 
 // ---------- 任务 ----------
@@ -488,14 +587,51 @@ export function jobProgress(job) {
   return { done, total: job.total || done };
 }
 
-export function jobPassRate(job) {
+/// 任务列表用的统计：打开明细的任务走 live 实时结果，运行中的走 per-run 实时缓存，
+/// 已结束的走后端 summary。口径与 computeStats 一致。
+export function runStats(job) {
   if (job.runId === state.jobs.live?.runId) {
     const live = liveStats.value;
-    if (live.total) return live.passRate;
+    // 还没结果时 passRate 是 0，界面应显示「—」而不是 0%
+    if (live.total) return live;
+    return emptyRunStats();
   }
+  if (["running", "cancelling"].includes(job.status)) {
+    const c = perRun.get(job.runId);
+    if (c && c.results.length) return computeStats(c.results);
+  }
+  const r = emptyRunStats();
   const s = job.summary;
-  if (!s?.valid) return null;
-  return s.passed / s.valid;
+  r.total = s?.total ?? 0;
+  r.valid = s?.valid ?? 0;
+  r.passed = s?.passed ?? 0;
+  r.failed = s?.failed ?? 0;
+  r.excluded = s?.excluded ?? 0;
+  r.passRate = r.valid ? r.passed / r.valid : null;
+  return r;
+}
+
+function emptyRunStats() {
+  return {
+    total: 0,
+    valid: 0,
+    passed: 0,
+    failed: 0,
+    excluded: 0,
+    passRate: null,
+    byType: [],
+    excludedTypes: [],
+  };
+}
+
+export function jobPassRate(job) {
+  return runStats(job).passRate;
+}
+
+/// 旧版本给任务标题自动拼了「· 11月12日 15:52」，列表已有时间列，显示时去掉这段后缀
+const DATE_SUFFIX_RE = / · \d{1,2}月\d{1,2}日 \d{1,2}:\d{2}$/;
+function stripDateSuffix(title) {
+  return String(title || "").replace(DATE_SUFFIX_RE, "");
 }
 
 export async function loadJobs() {
@@ -506,16 +642,149 @@ export async function loadJobs() {
     const runningPlaceholders = state.jobs.list.filter(
       (j) => j.pending && !arr.some((x) => x.runId === j.runId)
     );
-    state.jobs.list = [...runningPlaceholders, ...arr];
+    // 出现了之前没有的任务 = 刚跑完/刚启动一个新任务，分析页重新跟到最新一条。
+    // 用户手动选过某条老任务后 follow 为 false，这里不再打扰他。
+    // 注意：before 只算非占位任务。launchJobs 启动时会先 unshift 一个 pending 占位任务，
+    // 若把占位 runId 也算进 before，list_runs 返回真身时会被误判为「已有任务」，follow 永远不置回。
+    const before = new Set(
+      state.jobs.list.filter((j) => !j.pending).map((j) => j.runId)
+    );
+    if (arr.some((j) => !before.has(j.runId))) state.analysis.follow = true;
+    state.jobs.list = [
+      ...runningPlaceholders,
+      ...arr.map((j) => ({ ...j, title: stripDateSuffix(j.title) })),
+    ];
+    // 清理已结束任务的 per-run 实时缓存，避免残留；运行中/取消中的保留
+    for (const runId of perRun.keys()) {
+      const j = state.jobs.list.find((x) => x.runId === runId);
+      if (!j || !["running", "cancelling"].includes(j.status)) perRun.delete(runId);
+    }
   } catch (e) {
     console.warn("读取任务列表失败", e);
   }
 }
 
-function dateLabel() {
-  const d = new Date();
-  const p = (n) => String(n).padStart(2, "0");
-  return `${d.getMonth() + 1}月${p(d.getDate())}日 ${p(d.getHours())}:${p(d.getMinutes())}`;
+/// 老方案第一次用版号：按已跑过的任务数补出下一版，之后改由 plan.version 自己累加，
+/// 这样任务记录被清理也不会让版号回退、重号。
+function initPlanVersions() {
+  let changed = false;
+  for (const p of state.plans) {
+    if (p.version != null) continue;
+    const runs = state.jobs.list.filter((j) => j.planId === p.id).length;
+    p.version = runs + 1;
+    changed = true;
+  }
+  if (changed) scheduleSave();
+}
+
+// ---------- 任务记录保存范围 ----------
+
+export const RETENTION_OPTIONS = [
+  { days: 0, label: "永久保存", short: "永久" },
+  { days: 30, label: "保留近一个月", short: "近一个月" },
+  { days: 7, label: "保留近一周", short: "近一周" },
+  { days: 3, label: "保留近三天", short: "近三天" },
+];
+
+export function retentionLabelOf(days) {
+  return RETENTION_OPTIONS.find((o) => o.days === Number(days))?.label || "永久保存";
+}
+
+export function retentionShortOf(days) {
+  return RETENTION_OPTIONS.find((o) => o.days === Number(days))?.short || "永久";
+}
+
+/// 只数不删，给确认弹窗用
+export async function previewRetention(days) {
+  try {
+    return Number(await invoke("preview_retention", { days: Number(days) || 0 })) || 0;
+  } catch (e) {
+    console.warn("统计过期任务失败", e);
+    return 0;
+  }
+}
+
+/// 应用保存范围：先落盘设置（后端下次启动读盘），再清理，最后同步两侧的选中项
+export async function applyRetention(days) {
+  state.retentionDays = Number(days) || 0;
+  await flushSave();
+  let removed = 0;
+  try {
+    removed = Number(await invoke("apply_retention", { days: state.retentionDays })) || 0;
+  } catch (e) {
+    toast("清理任务记录失败：" + e, "err");
+    return 0;
+  }
+  await loadJobs();
+  const alive = new Set(state.jobs.list.map((j) => j.runId));
+  if (state.jobs.live && !alive.has(state.jobs.live.runId)) state.jobs.live = null;
+  if (state.analysis.runId && !alive.has(state.analysis.runId)) {
+    await selectAnalysisRun("");
+  }
+  return removed;
+}
+
+// ---------- 数据保存位置 ----------
+
+export async function loadDataDir() {
+  try {
+    const info = await invoke("data_dir_info");
+    if (info) state.dataDir = info;
+  } catch (e) {
+    console.warn("读取数据位置失败", e);
+  }
+}
+
+/// 切换数据保存位置。moveExisting 为真时把现有任务记录和数据集复制过去。
+/// 切完之后任务列表、数据集、分析页选中项全部按新位置重来。
+export async function applyDataDir(dir, moveExisting) {
+  const report = await invoke("set_data_dir", { dir, moveExisting });
+  await loadDataDir();
+
+  state.jobs.live = null;
+  await loadJobs();
+  await selectAnalysisRun("");
+
+  await loadDatasets();
+  if (state.activeDatasetId) await loadDatasetPreview(state.activeDatasetId, 0, 50);
+  const plan = activePlan();
+  if (plan?.datasetId) await syncDatasetMirror(plan.datasetId);
+
+  return report || { runs: 0, datasets: 0 };
+}
+
+export async function openDataDir() {
+  try {
+    await invoke("open_data_dir");
+  } catch (e) {
+    toast("打开文件夹失败：" + e, "err");
+  }
+}
+
+// ---------- 报告导出位置 ----------
+
+export async function loadExportDir() {
+  try {
+    const info = await invoke("export_dir_info");
+    if (info) state.exportDir = info;
+  } catch (e) {
+    console.warn("读取导出位置失败", e);
+  }
+}
+
+/// 设置固定导出目录；传空字符串等于恢复「每次导出弹保存框」
+export async function applyExportDir(dir) {
+  const info = await invoke("set_export_dir", { dir });
+  state.exportDir = info;
+  return info;
+}
+
+export async function openExportDir() {
+  try {
+    await invoke("open_export_dir");
+  } catch (e) {
+    toast("打开文件夹失败：" + e, "err");
+  }
 }
 
 /// 勾选多个方案并发启动，每个方案一个独立任务。
@@ -550,15 +819,19 @@ export function launchJobs() {
 
   const concurrency = Number(state.runForm.concurrency) || 1;
   const maxRetries = Number(state.runForm.maxRetries) || 0;
-  const prefix = state.runForm.titlePrefix.trim();
+  const suffix = state.runForm.titleSuffix.trim();
+  const withVersion = !!state.runForm.versionEnabled;
   const now = Date.now();
 
   let started = 0;
   for (const [i, plan] of plans.entries()) {
     const runId = `run-${now}-${i}-${Math.random().toString(36).slice(2, 6)}`;
-    const title = prefix
-      ? `${prefix} · ${plan.name}`
-      : `${plan.name} · ${dateLabel()}`;
+    // 版号按方案各自的累计次数走：方案 A 第 3 版、方案 B 第 1 版互不影响
+    const version = Math.max(1, Number(plan.version) || 1);
+    let title = suffix ? `${plan.name} · ${suffix}` : plan.name;
+    if (withVersion) title += ` · 第${version}版`;
+    // 启动即占号，避免连点两次启动时两个任务用同一个版号
+    if (withVersion) plan.version = version + 1;
     const ds = datasetMetaById(plan.datasetId);
     const job = {
       runId,
@@ -573,6 +846,7 @@ export function launchJobs() {
       status: "running",
       error: null,
       summary: null,
+      concurrency,
       pending: true,
     };
     state.jobs.list.unshift(job);
@@ -586,8 +860,8 @@ export function launchJobs() {
       planName: plan.name,
       prompts: {
         systemPrompt: plan.systemPrompt,
-        userTemplate: plan.userTemplate,
         evalPrompt: plan.evalPrompt,
+        injections: plan.injections,
       },
       datasetId: plan.datasetId,
       datasetName: ds?.name || "",
@@ -616,9 +890,31 @@ export function launchJobs() {
       });
   }
 
+  if (withVersion) scheduleSave();
   state.runForm.selectedPlanIds = [];
   state.runForm.launchOpen = false;
   return started;
+}
+
+/// 刷新版号：选中的方案都回到第 1 版重新数
+export function resetPlanVersions(ids) {
+  const set = new Set(ids || []);
+  for (const p of state.plans) {
+    if (set.has(p.id)) p.version = 1;
+  }
+  scheduleSave();
+}
+
+// ---------- 重点任务星标 ----------
+export function isStarred(runId) {
+  return state.starredRunIds.includes(runId);
+}
+
+export function toggleStar(runId) {
+  const i = state.starredRunIds.indexOf(runId);
+  if (i >= 0) state.starredRunIds.splice(i, 1);
+  else state.starredRunIds.push(runId);
+  scheduleSave();
 }
 
 function updateJobPlaceholder(runId, outcome) {
@@ -657,8 +953,8 @@ async function buildCfgFromJob(job, mode, retryIndices) {
     planName: plan.name,
     prompts: {
       systemPrompt: plan.systemPrompt,
-      userTemplate: plan.userTemplate,
       evalPrompt: plan.evalPrompt,
+      injections: plan.injections,
     },
     datasetId: plan.datasetId,
     datasetName: ds.name,
@@ -677,6 +973,7 @@ export async function cancelJob(runId) {
     toast("正在取消，在途请求已中断", "info");
     const job = state.jobs.list.find((j) => j.runId === runId);
     if (job) job.status = "cancelling";
+    if (state.jobs.live?.runId === runId) state.jobs.live.status = "cancelling";
   } else {
     toast("没有找到正在运行的任务，可能已经结束了", "info");
   }
@@ -685,8 +982,17 @@ export async function cancelJob(runId) {
 
 export async function deleteJob(job) {
   await invoke("delete_run", { runId: job.runId });
+  perRun.delete(job.runId);
   if (state.jobs.live?.runId === job.runId) state.jobs.live = null;
-  if (state.analysis.runId === job.runId) state.analysis.runId = "";
+  if (state.analysis.runId === job.runId) {
+    state.analysis.runId = "";
+    state.analysis.live = false;
+    state.analysis.liveResults = [];
+    analysisPos.clear();
+  }
+  // 任务没了，星标也一起清掉，免得越攒越多
+  const si = state.starredRunIds.indexOf(job.runId);
+  if (si >= 0) state.starredRunIds.splice(si, 1);
   await loadJobs();
   toast("已删除这个任务", "ok");
 }
@@ -703,6 +1009,7 @@ export async function resumeJob(job) {
     return false;
   }
   const cfg = await buildCfgFromJob(job, "resume", indices);
+  seedPerRun(job.runId, loaded.results);
   markJobRunning(job);
   invoke("start_run", { cfg })
     .then(async (outcome) => {
@@ -718,17 +1025,26 @@ export async function resumeJob(job) {
   return true;
 }
 
+/// 需要重跑的判定：调用没通、评测输出没解析出来、或者判了不通过。
+/// retryJob 和界面上的条数提示共用这一份，避免两处口径走偏。
+function isRetryable(r) {
+  return !!(r.targetError || !r.parseOk || !r.pass);
+}
+
+export function retryableCount(results) {
+  return (results || []).filter(isRetryable).length;
+}
+
 export async function retryJob(job) {
   const loaded = await invoke("load_run", { runId: job.runId });
   if (!loaded) throw new Error("任务结果文件不存在");
-  const indices = (loaded.results || [])
-    .filter((r) => r.targetError || !r.parseOk || !r.pass)
-    .map((r) => r.index);
+  const indices = (loaded.results || []).filter(isRetryable).map((r) => r.index);
   if (!indices.length) {
     toast("没有需要重跑的行", "info");
     return false;
   }
   const cfg = await buildCfgFromJob(job, "retry", indices);
+  seedPerRun(job.runId, loaded.results);
   markJobRunning(job);
   invoke("start_run", { cfg })
     .then(async (outcome) => {
@@ -747,10 +1063,40 @@ export async function retryJob(job) {
 function markJobRunning(job) {
   job.status = "running";
   job.error = null;
+  job.concurrency = Number(state.runForm.concurrency) || 1;
   state.jobs.progress[job.runId] = {
     done: state.jobs.live?.runId === job.runId ? state.jobs.live.results.length : 0,
     total: job.total,
   };
+  // 明细面板跟着切到运行中，操作按钮立即从「续跑/重跑」变成「停止」
+  if (state.jobs.live?.runId === job.runId) {
+    state.jobs.live.status = "running";
+    state.jobs.live.error = "";
+  }
+}
+
+/// 清空某个任务的结果：结果文件截断，任务退回「已中断」，可再续跑（等于全量重跑）。
+/// 任务本身、数据集快照和提示词快照都保留。
+export async function clearJob(job) {
+  await invoke("clear_run", { runId: job.runId });
+  perRun.delete(job.runId);
+  await loadJobs();
+  const live = state.jobs.live;
+  if (live?.runId === job.runId) {
+    live.results = [];
+    live.done = 0;
+    live.status = "interrupted";
+    live.error = "";
+    livePos.clear();
+    liveReceived = new Set();
+  }
+  // 分析页若正实时盯着该任务，同步清空
+  if (state.analysis.live && state.analysis.runId === job.runId) {
+    state.analysis.liveResults = [];
+    state.analysis.liveDone = 0;
+    analysisPos.clear();
+  }
+  toast("已清空这个任务的结果", "ok");
 }
 
 // ---------- 实时明细 ----------
@@ -770,6 +1116,31 @@ function normalizeResult(raw) {
     /* 忽略 */
   }
   return r;
+}
+
+/// 每个运行中任务各自的实时结果缓存：任务列表里的通过率 / 通过失败统计用。
+/// 与 state.jobs.live（当前打开明细的任务）互相独立，切明细不影响统计连续性。
+const perRun = new Map();
+
+/// 续跑 / 重跑前按磁盘已有结果重建 per-run 缓存，新完成的行再增量合并
+function seedPerRun(runId, results) {
+  const list = (results || []).map(normalizeResult).sort((a, b) => a.index - b.index);
+  const pos = new Map();
+  list.forEach((r, i) => pos.set(r.index, i));
+  perRun.set(runId, { results: list, pos });
+}
+
+/// 把推送的结果合并进该任务自己的实时缓存（按 runId 各配位置表）
+function mergePerRun(payload) {
+  if (!payload.runId) return;
+  let c = perRun.get(payload.runId);
+  if (!c) {
+    c = { results: [], pos: new Map() };
+    perRun.set(payload.runId, c);
+  }
+  if (typeof payload.done === "number") c.done = payload.done;
+  if (typeof payload.total === "number") c.total = payload.total;
+  mergeInto(c.results, c.pos, payload.results);
 }
 
 function reindexLive() {
@@ -808,24 +1179,41 @@ function mergeLiveMissing(list) {
   reindexLive();
 }
 
+/// 把推送的结果合并进目标数组：按 index 去重（后写覆盖先写），排序后重建位置表。
+/// 运行页实时明细和分析页实时缓存共用这一套，各配自己的位置表，互不串台。
+function mergeInto(target, posMap, rawList) {
+  for (const raw of rawList || []) {
+    const r = normalizeResult(raw);
+    const pos = posMap.get(r.index);
+    if (pos === undefined) {
+      posMap.set(r.index, target.length);
+      target.push(r);
+    } else {
+      target[pos] = r;
+    }
+  }
+  target.sort((a, b) => a.index - b.index);
+  posMap.clear();
+  target.forEach((r, i) => posMap.set(r.index, i));
+}
+
 function mergeLiveProgress(payload) {
   const live = state.jobs.live;
   if (!live || live.runId !== payload.runId) return;
   if (typeof payload.done === "number") live.done = payload.done;
   if (typeof payload.total === "number") live.total = payload.total;
-  for (const raw of payload.results || []) {
-    const r = normalizeResult(raw);
-    liveReceived.add(r.index);
-    const pos = livePos.get(r.index);
-    if (pos === undefined) {
-      livePos.set(r.index, live.results.length);
-      live.results.push(r);
-    } else {
-      live.results[pos] = r;
-    }
-  }
-  live.results.sort((a, b) => a.index - b.index);
-  reindexLive();
+  for (const raw of payload.results || []) liveReceived.add(raw.index);
+  mergeInto(live.results, livePos, payload.results);
+}
+
+/// 分析页实时缓存：只合并当前选中的运行中任务，done/total 更新到 analysis 上
+const analysisPos = new Map();
+function mergeAnalysisLive(payload) {
+  const a = state.analysis;
+  if (!a.live || a.runId !== payload.runId) return;
+  if (typeof payload.done === "number") a.liveDone = payload.done;
+  if (typeof payload.total === "number") a.liveTotal = payload.total;
+  mergeInto(a.liveResults, analysisPos, payload.results);
 }
 
 let runListener = null;
@@ -836,6 +1224,8 @@ export async function attachRunListener() {
     if (p.runId) {
       state.jobs.progress[p.runId] = { done: p.done, total: p.total };
       mergeLiveProgress(p);
+      mergePerRun(p);
+      mergeAnalysisLive(p);
     }
   });
 }
@@ -870,7 +1260,7 @@ export async function openLive(runId) {
     state.jobs.live.done = Math.max(state.jobs.live.done, state.jobs.live.results.length);
     state.jobs.live.total = run.meta.total || state.jobs.live.total;
     state.jobs.live.status = run.meta.status;
-    state.jobs.live.title = run.meta.title || state.jobs.live.title;
+    state.jobs.live.title = stripDateSuffix(run.meta.title) || state.jobs.live.title;
     state.jobs.live.planName = run.meta.planName || state.jobs.live.planName;
     state.jobs.live.datasetName = run.meta.datasetName || state.jobs.live.datasetName;
     state.jobs.live.dataset = run.dataset || null;
@@ -895,7 +1285,7 @@ export function statusLabelOf(row) {
 }
 
 // ---------- 分析 ----------
-export async function selectAnalysisRun(runId) {
+export async function selectAnalysisRun(runId, force = false) {
   if (!runId) {
     state.analysis = {
       runId: "",
@@ -904,31 +1294,66 @@ export async function selectAnalysisRun(runId) {
       badLines: 0,
       dataset: null,
       loading: false,
+      follow: state.analysis.follow,
+      live: false,
+      liveResults: [],
+      liveDone: 0,
+      liveTotal: 0,
     };
     resetAnalysisView();
     return;
   }
-  if (state.analysis.runId === runId) return;
+  if (state.analysis.runId === runId && !force) return;
   state.analysis.loading = true;
   try {
     const run = await invoke("load_run", { runId });
+    const job = state.jobs.list.find((j) => j.runId === runId);
+    const isLive = !!job && ["running", "cancelling"].includes(job.status);
     if (!run) {
+      // 运行中但还没建目录的占位任务：不报错，先进实时模式等事件填充
+      if (isLive) {
+        state.analysis = {
+          runId,
+          meta: null,
+          results: [],
+          badLines: 0,
+          dataset: null,
+          loading: false,
+          follow: state.analysis.follow,
+          live: true,
+          liveResults: [],
+          liveDone: 0,
+          liveTotal: job?.total || 0,
+        };
+        resetAnalysisView();
+        return;
+      }
       toast("这条任务记录已经不在了", "info");
       state.analysis.runId = "";
       state.analysis.meta = null;
       state.analysis.results = [];
       return;
     }
+    const normalized = (run.results || [])
+      .map(normalizeResult)
+      .sort((a, b) => a.index - b.index);
     state.analysis = {
       runId,
       meta: run.meta,
-      results: (run.results || [])
-        .map(normalizeResult)
-        .sort((a, b) => a.index - b.index),
+      results: normalized,
       badLines: run.badLines || 0,
       dataset: run.dataset || null,
       loading: false,
+      follow: state.analysis.follow,
+      live: isLive,
+      liveResults: isLive ? normalized.slice() : [],
+      liveDone: isLive ? normalized.length : 0,
+      liveTotal: isLive ? run.meta.total || 0 : 0,
     };
+    if (isLive) {
+      analysisPos.clear();
+      state.analysis.liveResults.forEach((r, i) => analysisPos.set(r.index, i));
+    }
     resetAnalysisView();
     if (run.badLines > 0) {
       toast(`这条任务有 ${run.badLines} 行结果损坏，已跳过`, "info", 5000);
@@ -988,7 +1413,15 @@ function snapshot() {
     activePlanId: state.activePlanId,
     concurrency: Number(state.runForm.concurrency) || 4,
     maxRetries: Number(state.runForm.maxRetries) || 0,
+    versionEnabled: !!state.runForm.versionEnabled,
+    starredRunIds: plain(state.starredRunIds),
     theme: state.theme,
+    // 任务记录保存范围（天），0 = 永久。后端启动时和任务结束后按它清理
+    retentionDays: Number(state.retentionDays) || 0,
+    sidebarCollapsed: !!state.sidebarCollapsed,
+    liveWidthPct: Number(state.liveWidthPct) || 0.6,
+    listWidthPx: Number(state.listWidthPx) || 280,
+    listCollapsed: !!state.listCollapsed,
     // auto-iterate 脚本继续读这三个旧字段，镜像当前方案的配置
     settings: {
       target: profileOf(target),
@@ -999,8 +1432,13 @@ function snapshot() {
     prompts: {
       title: plan?.name || "",
       systemPrompt: plan?.systemPrompt || "",
-      userTemplate: plan?.userTemplate || "",
       evalPrompt: plan?.evalPrompt || "",
+      injections: plan?.injections || {
+        targetSystem: blankSlot(),
+        targetUser: blankSlot(),
+        judgeSystem: blankSlot(),
+        judgeUser: blankSlot(),
+      },
     },
   };
 }
@@ -1066,6 +1504,126 @@ function sanitizeConnections(list) {
   return out;
 }
 
+/// 数据注入槽位归一化：新格式的 injections 槽位对象，缺字段则补默认。
+/// 评测提示词位置由 promptIn 决定（不再有 evalSlot）。
+function slotOf(s) {
+  if (!s || typeof s !== "object") return blankSlot();
+  return {
+    enabled: !!s.enabled,
+    text: String(s.text || ""),
+    promptIn: !!s.promptIn,
+    dataIn: !!s.dataIn,
+  };
+}
+
+/// 迁移：新格式有 injections 直接读（老版本 injections 缺 promptIn/dataIn 时，
+/// 用老 evalSlot 回填评测提示词去向，且默认渲染 input/output）；
+/// 老格式用 userTemplate + dataSlot 换算成被测槽位。
+/// 老 dataSlot=system → 数据进被测 system；dataSlot=user（或没有）→ 数据进被测 user。
+function migrateInjections(raw) {
+  const inj = raw && typeof raw.injections === "object" ? raw.injections : {};
+  // 老 evalSlot：评测提示词本体发到 system 还是 user（老版本恒渲染 input/output）
+  const oldEvalInSystem = (raw?.evalSlot || "user") === "system";
+  if (inj.targetSystem || inj.targetUser || inj.judgeSystem || inj.judgeUser) {
+    const judgeSystem = slotOf(inj.judgeSystem);
+    const judgeUser = slotOf(inj.judgeUser);
+    // 老版本 injections 没有 promptIn/dataIn（都是 false），用老 evalSlot 回填评测去向
+    if (!("promptIn" in inj.judgeSystem) || !("promptIn" in inj.judgeUser)) {
+      if (oldEvalInSystem) {
+        judgeSystem.promptIn = true;
+        judgeSystem.dataIn = true;
+      } else {
+        judgeUser.promptIn = true;
+        judgeUser.dataIn = true;
+      }
+    }
+    const targetSystem = slotOf(inj.targetSystem);
+    // 老版本没有 promptIn：主体提示词当时恒在被测 system，迁移后必须保持发在 system，
+    // 否则主体提示词会整段丢失。
+    if (!("promptIn" in inj.targetSystem)) targetSystem.promptIn = true;
+    return {
+      targetSystem,
+      targetUser: slotOf(inj.targetUser),
+      judgeSystem,
+      judgeUser,
+    };
+  }
+  const fresh = {
+    targetSystem: blankSlot(),
+    targetUser: blankSlot(),
+    judgeSystem: blankSlot(),
+    judgeUser: blankSlot(),
+  };
+  // 老版本主体提示词恒在被测 system，迁移后保持
+  fresh.targetSystem.promptIn = true;
+  const tpl = String(raw?.userTemplate || "");
+  if (tpl.trim()) {
+    const dataSlot = raw?.dataSlot === "system" ? "system" : "user";
+    if (dataSlot === "system") {
+      fresh.targetSystem = { enabled: true, text: tpl, promptIn: true, dataIn: false };
+    } else {
+      fresh.targetUser = { enabled: true, text: tpl, promptIn: false, dataIn: false };
+    }
+  }
+  // 老 evalSlot：评测提示词放到对应槽位，恒渲染 input/output
+  if (oldEvalInSystem) {
+    fresh.judgeSystem.promptIn = true;
+    fresh.judgeSystem.dataIn = true;
+  } else {
+    fresh.judgeUser.promptIn = true;
+    fresh.judgeUser.dataIn = true;
+  }
+  return fresh;
+}
+
+/// 规则 A 迁移：勾了「提示词本体导入」的槽位现在只发提示词本体，
+/// 数据模板退化成「声明这个槽位渲染哪几列」，本身不再作为消息内容发出去。
+/// 老方案那段数据本来是发出去的，这里按需并进提示词本体：
+/// 提示词本体一个都没引用到模板里的列时，把模板原样接到末尾（等于规则 A 之前的发送形态）；
+/// 已经引用到的就不接，免得同一份数据注入两遍。
+function absorbTemplate(prompt, slot) {
+  const tpl = String(slot?.text || "").trim();
+  if (!slot?.promptIn || !slot.enabled || !tpl) return prompt;
+  const inPrompt = referencedVars(prompt);
+  const tplCols = [...referencedVars(tpl)].filter((v) => !RESERVED_VARS.has(v));
+  if (tplCols.some((v) => inPrompt.has(v))) return prompt;
+  return `${String(prompt).replace(/\s+$/, "")}\n\n${tpl}`;
+}
+
+function normalizePlan(raw, id) {
+  const injections = migrateInjections(raw);
+  // 提示词本体总得有个槽位承载：一侧两个槽位都不认领，就放回 system，
+  // 否则整段提示词会静默地不再发送
+  if (!injections.targetSystem.promptIn && !injections.targetUser.promptIn) {
+    injections.targetSystem.promptIn = true;
+  }
+  if (!injections.judgeSystem.promptIn && !injections.judgeUser.promptIn) {
+    injections.judgeSystem.promptIn = true;
+  }
+  let systemPrompt = String(raw.systemPrompt || "");
+  let evalPrompt = String(raw.evalPrompt || "");
+  for (const s of [injections.targetSystem, injections.targetUser]) {
+    systemPrompt = absorbTemplate(systemPrompt, s);
+  }
+  for (const s of [injections.judgeSystem, injections.judgeUser]) {
+    evalPrompt = absorbTemplate(evalPrompt, s);
+  }
+  return {
+    id,
+    name: String(raw.name || "未命名方案"),
+    // 老方案没有版号字段，留 null，等任务列表读回来按累计次数补齐
+    version: raw.version == null ? null : Math.max(1, Number(raw.version) || 1),
+    systemPrompt,
+    evalPrompt,
+    // 只有新方案带自动列块；迁移来的方案不去猜哪段是自动写的
+    autoCols: Array.isArray(raw.autoCols) ? raw.autoCols : [],
+    datasetId: String(raw.datasetId || ""),
+    targetId: String(raw.targetId || ""),
+    judgeId: String(raw.judgeId || ""),
+    injections,
+  };
+}
+
 function sanitizePlans(list) {
   const used = new Set();
   const out = [];
@@ -1074,16 +1632,9 @@ function sanitizePlans(list) {
     let id = String(raw.id || "");
     if (!id || used.has(id)) id = uid("plan");
     used.add(id);
-    out.push({
-      id,
-      name: String(raw.name || "未命名方案"),
-      systemPrompt: String(raw.systemPrompt || ""),
-      userTemplate: String(raw.userTemplate || ""),
-      evalPrompt: String(raw.evalPrompt || ""),
-      datasetId: String(raw.datasetId || ""),
-      targetId: String(raw.targetId || ""),
-      judgeId: String(raw.judgeId || ""),
-    });
+    // 数据注入四槽位：新格式读 injections，老格式从 userTemplate + dataSlot 换算，
+    // 评测提示词去向（promptIn）从老 evalSlot 回填
+    out.push(normalizePlan(raw, id));
   }
   return out;
 }
@@ -1171,16 +1722,20 @@ export async function loadSettings() {
       ? "conn-judge"
       : state.connections[0]?.id || "";
     state.plans = [
-      {
-        id: uid("plan"),
-        name: String(legacyPrompts.title || "").trim() || "默认方案",
-        systemPrompt: String(legacyPrompts.systemPrompt || DEFAULT_SYSTEM_PROMPT),
-        userTemplate,
-        evalPrompt: String(legacyPrompts.evalPrompt || DEFAULT_EVAL_PROMPT),
-        datasetId: firstDs?.id || "",
-        targetId,
-        judgeId,
-      },
+      // 旧版单方案配置迁移后保持原发送形态：评测提示词走 user，数据走被测 user
+      normalizePlan(
+        {
+          name: String(legacyPrompts.title || "").trim() || "默认方案",
+          systemPrompt: String(legacyPrompts.systemPrompt || DEFAULT_SYSTEM_PROMPT),
+          evalPrompt: String(legacyPrompts.evalPrompt || DEFAULT_EVAL_PROMPT),
+          datasetId: firstDs?.id || "",
+          targetId,
+          judgeId,
+          userTemplate,
+          evalSlot: "user",
+        },
+        uid("plan")
+      ),
     ];
   } else {
     state.plans = [];
@@ -1191,9 +1746,16 @@ export async function loadSettings() {
 
   state.runForm.concurrency = Number(conf.concurrency ?? legacySettings.concurrency ?? 4) || 4;
   state.runForm.maxRetries = Number(conf.maxRetries ?? legacySettings.maxRetries ?? 2) || 0;
+  state.runForm.versionEnabled = !!conf.versionEnabled;
+  state.starredRunIds = Array.isArray(conf.starredRunIds) ? conf.starredRunIds.map(String) : [];
 
   applySavedTheme(conf.theme);
   if (!conf.theme) applyTheme(systemTheme());
+  state.retentionDays = Number(conf.retentionDays) || 0;
+  state.sidebarCollapsed = !!conf.sidebarCollapsed;
+  state.liveWidthPct = Number(conf.liveWidthPct) || 0.6;
+  state.listWidthPx = Number(conf.listWidthPx) || 280;
+  state.listCollapsed = !!conf.listCollapsed;
 
   if (state.activeDatasetId) {
     await loadDatasetPreview(state.activeDatasetId, 0, 50);
@@ -1202,7 +1764,10 @@ export async function loadSettings() {
   state.ready = true;
 
   // 任务列表与启动时中断恢复
+  await loadDataDir();
+  await loadExportDir();
   await loadJobs();
+  initPlanVersions();
 
   const plan = activePlan();
   if (plan?.datasetId) await syncDatasetMirror(plan.datasetId);
@@ -1293,7 +1858,9 @@ export function computeStats(list) {
   };
 }
 
-export const viewResults = computed(() => state.analysis.results);
+export const viewResults = computed(() =>
+  state.analysis.live ? state.analysis.liveResults : state.analysis.results
+);
 export const viewStats = computed(() => computeStats(viewResults.value));
 export const isHistoryView = computed(() => !!state.analysis.runId);
 
@@ -1395,6 +1962,8 @@ watch(
     state.theme,
     state.runForm.concurrency,
     state.runForm.maxRetries,
+    state.runForm.versionEnabled,
+    state.retentionDays,
   ],
   () => scheduleSave(),
   { deep: true }

@@ -105,6 +105,13 @@ defineProps({
     <g v-else-if="name === 'stop'">
       <rect x="7" y="7" width="10" height="10" rx="1" fill="currentColor" stroke="none" />
     </g>
+    <g v-else-if="name === 'star'">
+      <path d="M12 3.6l2.6 5.4 5.9.9-4.3 4.2 1 5.9L12 17.2l-5.2 2.8 1-5.9-4.3-4.2 5.9-.9Z" />
+    </g>
+    <g v-else-if="name === 'star-filled'">
+      <path d="M12 3.6l2.6 5.4 5.9.9-4.3 4.2 1 5.9L12 17.2l-5.2 2.8 1-5.9-4.3-4.2 5.9-.9Z"
+        fill="currentColor" />
+    </g>
     <g v-else-if="name === 'eye'">
       <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z" />
       <circle cx="12" cy="12" r="2.5" />
@@ -124,6 +131,13 @@ defineProps({
     <g v-else-if="name === 'clock'">
       <circle cx="12" cy="12" r="8" />
       <path d="M12 8v4l3 2" />
+    </g>
+    <g v-else-if="name === 'folder'">
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+    </g>
+    <g v-else-if="name === 'clipboard'">
+      <rect x="5" y="4" width="14" height="16" rx="2" />
+      <path d="M9 4V3.5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1V4M9 11h6M9 15h6" />
     </g>
   </svg>
 </template>

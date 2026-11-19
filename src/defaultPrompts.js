@@ -1,6 +1,6 @@
 /// 三个编辑框的默认模板。
 /// 只演示「怎么写、怎么用」，不含任何具体业务内容：
-/// 主体提示词给一个可直接运行的最小任务，用户消息模板演示 {{列名}} 注入，
+/// 主体提示词给一个可直接运行的最小任务，数据注入模板演示 {{列名}} 注入，
 /// 评测提示词演示 BLOCKER / QUALITY 分级与 JSON 输出契约。
 
 export const DEFAULT_SYSTEM_PROMPT = `# 角色
@@ -18,16 +18,40 @@ export const DEFAULT_SYSTEM_PROMPT = `# 角色
 # 输出格式
 只输出改写后的正文，不要标题、解释、前言或结语。`;
 
-/// 用户消息模板没有唯一形态：有数据集时按选中的列生成，没有时给一个可读的示例
+/// 默认注入列排除名单：数据集常带行号列（序号），默认不注入；列选择器里仍可手动勾上
+export const DEFAULT_EXCLUDED_COLS = ["序号"];
+
+/// 默认注入列 = 全部列去掉排除名单
+export function defaultInjectedColumns(columns) {
+  const ex = new Set(DEFAULT_EXCLUDED_COLS);
+  return (columns || []).filter((c) => !ex.has(c));
+}
+
+/// 数据注入模板没有唯一形态：有数据集时按选中的列生成，没有时给一个可读的示例。
+/// 默认只注入排除名单外的列（「序号」除外，可手动勾）。
+/// 模板只声明注入哪几列；渲染时每列会自动带「===== 列名 =====" 标题、
+/// 并被一对括号包裹成 (===== 列名 =====\n\n值)，由注入逻辑统一生成，模板里不用写。
 export function defaultUserTemplate(columns) {
-  if (columns && columns.length) {
-    return columns.map((c) => `{{${c}}}`).join("\n\n");
+  const cols = defaultInjectedColumns(columns);
+  if (cols.length) {
+    return cols.map((c) => `{{${c}}}`).join("\n\n");
   }
   return `请整理以下内容：
 
 {{列名1}}
 
 {{列名2}}`;
+}
+
+/// 新方案默认把提示词和数据都放在被测 system，所以主体提示词末尾要真的引用列名，
+/// 数据才会渲染进来。这段跟着数据集列走，没有列时不接。
+export const AUTO_COLS_HEADING = "# 待处理内容";
+
+/// 已按注入规则过滤好的列，生成接在主体提示词末尾的那段。cols 为空返回空串。
+/// 只引用列名；渲染时每列自动带标题与括号，与提示词本体划清界限。
+export function autoColsBlock(cols) {
+  if (!cols.length) return "";
+  return `\n\n${AUTO_COLS_HEADING}\n${cols.map((c) => `{{${c}}}`).join("\n\n")}`;
 }
 
 export const DEFAULT_EVAL_PROMPT = `# 角色
@@ -92,7 +116,7 @@ export const DEFAULT_NOTES = {
   systemPrompt:
     "被测模型的 system prompt。默认模板演示了「角色 / 任务 / 要求 / 输出格式」四段式写法，可直接运行，也可以整段替换成你要评测的提示词。",
   userTemplate:
-    "被测模型的 user 消息。用 {{列名}} 注入数据列，跑测时按数据集逐行替换。有数据集且已勾选列时，默认模板直接用这些列生成；没有数据集时给出示例写法。",
+    "数据注入：四个消息槽位（被测 / 评测 × system / user）各有一个数据模板，用 {{列名}} 引用数据列。列名填进哪个槽位，数据才在哪个槽位渲染——其他槽位（含提示词里）提到同名变量只是字面花括号。渲染时每一列自动变成 (===== 列名 =====\n\n值) 的形式，带列名标题、每列一对括号，数据与提示词清晰分开。勾了「提示词本体导入」的槽位，发出去的是提示词本体，数据模板退化成「声明这个槽位渲染哪几列」，本身不作为消息内容；没勾的槽位，数据模板渲染后就是这条消息。评测组还有「被测数据导入」开关，决定 {{input}}/{{output}} 在该槽位是否渲染成实际数据。默认提示词和数据都在被测 system，主体提示词末尾自动接上「{{列}}」那一段，自动排除「序号」列。",
   evalPrompt:
     "裁判模型的提示词。{{input}} 是「被评估模型的提示词 + 本条输入」，{{output}} 是被测模型的实际输出。默认模板演示了 BLOCKER / QUALITY 分级、标准写法和 JSON 输出契约，记得把【评测标准】换成你自己任务的标准。",
 };

@@ -11,6 +11,8 @@ export default {
         sidebar: "rgb(var(--sidebar) / <alpha-value>)",
         wash: "rgb(var(--wash) / <alpha-value>)",
         line: "rgb(var(--line) / <alpha-value>)",
+        // 卡片描边，比 line 亮一档；暗色下阴影几乎不可见，靠它勾出卡片边缘
+        cardline: "rgb(var(--card-line) / <alpha-value>)",
         main: "rgb(var(--text-main) / <alpha-value>)",
         sub: "rgb(var(--text-sub) / <alpha-value>)",
         weak: "rgb(var(--text-weak) / <alpha-value>)",
@@ -22,8 +24,20 @@ export default {
         warn: "rgb(var(--warn) / <alpha-value>)",
       },
       fontFamily: {
-        sans: ["Segoe UI", "Microsoft YaHei", "PingFang SC", "system-ui", "sans-serif"],
+        sans: [
+          "Segoe UI Variable Text",
+          "Segoe UI",
+          "Microsoft YaHei UI",
+          "Microsoft YaHei",
+          "PingFang SC",
+          "system-ui",
+          "sans-serif",
+        ],
         mono: ["Cascadia Code", "Consolas", "JetBrains Mono", "monospace"],
+      },
+      boxShadow: {
+        card: "var(--shadow-card)",
+        pop: "var(--shadow-pop)",
       },
     },
   },

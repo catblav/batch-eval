@@ -24,12 +24,19 @@ pub fn run() {
             run_store::migrate_legacy_dirs(&h);
             // 进程被杀时残留的 running 任务标记为 interrupted，保留已完成结果
             run_store::recover_running(&run_store::runs_root(&h));
-            run_store::cleanup_finished(&run_store::runs_root(&h));
+            run_store::cleanup_expired(&h);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             storage::load_settings,
             storage::save_settings,
+            storage::data_dir_info,
+            storage::set_data_dir,
+            storage::open_data_dir,
+            storage::export_dir_info,
+            storage::set_export_dir,
+            storage::open_export_dir,
+            storage::export_file_path,
             storage::load_dataset,
             storage::save_dataset,
             storage::read_text_file,
@@ -47,6 +54,9 @@ pub fn run() {
             run_store::list_runs,
             run_store::load_run,
             run_store::delete_run,
+            run_store::clear_run,
+            run_store::preview_retention,
+            run_store::apply_retention,
             dataset::parse_dataset_file,
             dataset::parse_dataset_text,
             report::export_excel_report,

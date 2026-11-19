@@ -4,7 +4,7 @@ use crate::run_store::{self, PromptSnapshot, RunMeta, RunSummary};
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -21,7 +21,7 @@ pub const MAX_ACTIVE_RUNS: usize = 4;
 #[serde(rename_all = "camelCase")]
 pub struct RunConfig {
     pub run_id: String,
-    /// 任务名称，默认「方案名 · 日期」；可以为空
+    /// 任务名称，由前端拼好传入（方案名 · 后缀 · 第N版）；可以为空
     #[serde(default)]
     pub title: String,
     #[serde(default)]
@@ -71,6 +71,9 @@ pub fn status_label_of(row: &Map<String, Value>) -> String {
 #[serde(rename_all = "camelCase")]
 pub struct RowResult {
     pub index: usize,
+    /// 被测模型实际收到的 system 消息（渲染后）。旧结果文件没有这个字段
+    #[serde(default)]
+    pub system: String,
     pub input: String,
     pub output: String,
     pub target_error: Option<String>,
@@ -211,6 +214,70 @@ impl RunRegistry {
 
 }
 
+/// 从模板文本提取引用的变量名（{{列名}} / {{input}} / {{output}}），去重、去空白。
+fn template_vars(tpl: &str) -> HashSet<String> {
+    let bytes = tpl.as_bytes();
+    let mut set = HashSet::new();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'{' && bytes[i + 1] == b'{' {
+            let mut j = i + 2;
+            while j + 1 < bytes.len() && !(bytes[j] == b'}' && bytes[j + 1] == b'}') {
+                j += 1;
+            }
+            if j + 1 < bytes.len() {
+                let inner = tpl[i + 2..j].trim();
+                if !inner.is_empty() {
+                    set.insert(inner.to_string());
+                }
+                i = j + 2;
+                continue;
+            }
+            break;
+        }
+        i += 1;
+    }
+    set
+}
+
+/// 槽位渲染：只替换「该槽位注入的列」{{列名}}；{{input}}/{{output}} 仅在 data_in 时替换。
+/// 提示词或模板里引用但没注入本槽位的变量保持字面——数据只渲染在它被填入的槽位。
+fn render_slot(
+    text: &str,
+    row: &Map<String, Value>,
+    slot_cols: &HashSet<String>,
+    data_in: bool,
+    input: &str,
+    output: &str,
+) -> String {
+    let mut out = text.to_string();
+    for (k, v) in row {
+        if slot_cols.contains(k) {
+            let val = match v {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            // 数据注入：每列带「===== 列名 =====" 标题、各自被一对括号包裹。
+            // 提示词是提示词、数据是数据，模型才不会把数据里的文字
+            // （看似指令、要求）当成提示词的一部分执行；括号让每一列数据
+            // 的边界明确，多列数据挤在一起也能分清。
+            out = out.replace(
+                &format!("{{{{{}}}}}", k),
+                &format!("(===== {k} =====\n\n{val})"),
+            );
+        }
+    }
+    if data_in {
+        out = out.replace("{{input}}", input);
+        out = out.replace("{{output}}", output);
+        out = out.replace("{{ input }}", input);
+        out = out.replace("{{ output }}", output);
+    }
+    out
+}
+
+/// 全列渲染 + input/output 渲染（测试用）
+#[cfg(test)]
 fn render(template: &str, row: &Map<String, Value>, input: &str, output: &str) -> String {
     let mut out = template.to_string();
     for (k, v) in row {
@@ -222,23 +289,68 @@ fn render(template: &str, row: &Map<String, Value>, input: &str, output: &str) -
     }
     out = out.replace("{{input}}", input);
     out = out.replace("{{output}}", output);
-    // 兼容 {{input}} 的空格写法
     out = out.replace("{{ input }}", input);
     out = out.replace("{{ output }}", output);
     out
 }
 
-/// 裁判看到的 `{{input}}`：被评估模型的提示词 + 本条已渲染的用户消息。
+/// 裁判看到的 `{{input}}`：被评估模型实际收到的消息。
 ///
 /// 只给用户消息不够——很多缺陷是「提示词要求了某件事，但输出没做到」，
 /// 裁判必须同时看到提示词才能判。
+/// 空的那条消息不出现，也就不留空标题：数据全在被测 system 里时，
+/// 不该凭空多出一段空的「本条输入」。
 fn judge_input_text(system_prompt: &str, user_msg: &str) -> String {
     let sys = system_prompt.trim();
+    let user = user_msg.trim();
     if sys.is_empty() {
-        user_msg.to_string()
-    } else {
-        format!("【被评估模型的提示词】\n{sys}\n\n【本条输入】\n{user_msg}")
+        return user.to_string();
     }
+    if user.is_empty() {
+        return format!("【被评估模型的提示词】\n{sys}");
+    }
+    format!("【被评估模型的提示词】\n{sys}\n\n【本条输入】\n{user}")
+}
+
+/// 槽位注入的列集合：仅当槽位启用且文本非空时有效。
+/// 提示词（主体/评测）里引用列只在此集合内才渲染，其余保持字面——
+/// 数据只渲染在它被填入的槽位。
+fn slot_cols(slot: &run_store::InjectSlot) -> HashSet<String> {
+    if slot.enabled && !slot.text.trim().is_empty() {
+        template_vars(&slot.text)
+    } else {
+        HashSet::new()
+    }
+}
+
+/// 组装一个槽位的最终文本。
+///
+/// 导入了提示词本体的槽位：消息 = 提示词本体（按本槽位声明的列渲染）。
+/// 数据模板在这里只负责声明「注入哪几列」，本身不作为文本发出去——
+/// 否则数据会在提示词里渲染一遍、模板里再贴一遍，同一份数据出现两次。
+///
+/// 没导入提示词本体的槽位：消息 = 数据模板渲染后的内容（比如被测 user 单独收数据）。
+/// 被测侧传空 input/output（那两个变量只对评测侧有意义）。
+fn build_slot(
+    prompt: &str,
+    slot: &run_store::InjectSlot,
+    row: &Map<String, Value>,
+    input: &str,
+    output: &str,
+) -> String {
+    let cols = slot_cols(slot);
+    if slot.prompt_in {
+        return render_slot(prompt, row, &cols, slot.data_in, input, output);
+    }
+    if slot.enabled && !slot.text.trim().is_empty() {
+        let rendered = render_slot(&slot.text, row, &cols, slot.data_in, input, output);
+        if rendered.trim().is_empty() {
+            return String::new();
+        }
+        // 纯数据槽位：列名标题与括号已由 render_slot 逐列生成，这里不再整体包裹
+        return rendered;
+    }
+    String::new()
 }
 
 fn jitter_ms(span: u64) -> u64 {
@@ -364,13 +476,15 @@ async fn run_one(
     if flag.load(Ordering::SeqCst) {
         return None;
     }
-    let user_msg = render(&cfg.prompts.user_template, row, "", "");
-    // 系统提示词与用户消息同样按行渲染：两者都可能引用数据集列，
-    // 不渲染会把 {{列名}} 字面量发给模型。
-    let system_prompt = render(&cfg.prompts.system_prompt, row, "", "");
+    let inj = &cfg.prompts.injections;
+    // 被测两侧槽位：主体提示词本体（prompt_in 决定发到哪个槽位）+ 数据模板。
+    // input/output 只对评测侧有意义，这里传空。
+    let target_system = build_slot(&cfg.prompts.system_prompt, &inj.target_system, row, "", "");
+    let target_user = build_slot(&cfg.prompts.system_prompt, &inj.target_user, row, "", "");
     let mut res = RowResult {
         index: idx,
-        input: user_msg.clone(),
+        system: target_system.clone(),
+        input: target_user.clone(),
         output: String::new(),
         target_error: None,
         pass: false,
@@ -392,8 +506,8 @@ async fn run_one(
     let target = match call_with_retry(
         target_client,
         &cfg.target,
-        &system_prompt,
-        &user_msg,
+        &target_system,
+        &target_user,
         cfg.max_retries,
         flag,
         target_gate,
@@ -422,13 +536,29 @@ async fn run_one(
         return None;
     }
 
-    let input_for_judge = judge_input_text(&system_prompt, &user_msg);
-    let judge_input = render(&cfg.prompts.eval_prompt, row, &input_for_judge, &res.output);
+    let input_for_judge = judge_input_text(&target_system, &target_user);
+    // 评测两侧槽位：评测提示词本体（prompt_in）+ 数据模板；
+    // 「被测数据导入」（data_in）决定 {{input}}/{{output}} 在该槽位是否渲染成真实数据，
+    // 不勾选则保留字面花括号。
+    let judge_system = build_slot(
+        &cfg.prompts.eval_prompt,
+        &inj.judge_system,
+        row,
+        &input_for_judge,
+        &res.output,
+    );
+    let judge_user = build_slot(
+        &cfg.prompts.eval_prompt,
+        &inj.judge_user,
+        row,
+        &input_for_judge,
+        &res.output,
+    );
     match call_with_retry(
         judge_client,
         &cfg.judge,
-        "",
-        &judge_input,
+        &judge_system,
+        &judge_user,
         cfg.max_retries,
         flag,
         judge_gate,
@@ -832,7 +962,7 @@ pub async fn start_run(app: AppHandle, cfg: RunConfig) -> Result<RunOutcome, Str
     meta.error = error.clone();
     let _ = run_store::write_meta(&dir, &meta);
 
-    run_store::cleanup_finished(&run_store::runs_root(&app));
+    run_store::cleanup_expired(&app);
     drop(lease);
 
     Ok(RunOutcome {
@@ -890,6 +1020,26 @@ mod tests {
         assert!(!out.contains("{{rules}}"));
     }
 
+    /// 导出的 system 列必须是渲染后的全文：槽位声明了 resume 列，
+    /// 表格里就要能看到 resume 的实际内容，而不是 {{resume}} 字面。
+    #[test]
+    fn exported_system_column_contains_rendered_data() {
+        let r = row(&[(
+            "resume",
+            "张三\n教育经历：某大学\n工作经历：某公司｜运营｜3年",
+        )]);
+        let slot = run_store::InjectSlot {
+            enabled: true,
+            text: "{{resume}}".into(),
+            prompt_in: true,
+            data_in: false,
+        };
+        let sys = build_slot("你是招聘助手，请评估以下简历：\n{{resume}}", &slot, &r, "", "");
+        assert!(sys.contains("张三"));
+        assert!(sys.contains("工作经历：某公司｜运营｜3年"));
+        assert!(!sys.contains("{{resume}}"));
+    }
+
     #[test]
     fn non_string_cells_are_stringified() {
         let mut r = Map::new();
@@ -917,10 +1067,138 @@ mod tests {
         assert!(out.ends_with(">>>|<<<模型输出>>>"));
     }
 
+    /// 核心规则：数据只渲染在它被填入的槽位。
+    /// 列没填进某个槽位时，该槽位文本里提到的同名变量保持字面花括号。
+    #[test]
+    fn columns_render_only_in_the_slot_they_are_filled_into() {
+        let r = row(&[("content", "原始经历"), ("mode", "strict")]);
+        // 列填进 targetUser：被测 system 里提到 {{content}} 也不渲染
+        let target_sys_cols = template_vars("{{mode}}");
+        let sys = render_slot("整理 {{content}}（模式 {{mode}}）", &r, &target_sys_cols, false, "", "");
+        assert!(sys.contains("strict"), "填进本槽位的列要渲染：{sys}");
+        assert!(sys.contains("{{content}}"), "没填进本槽位的列要保持字面：{sys}");
+    }
+
+    /// {{input}}/{{output}} 只在 data_in 时渲染；不勾选时保留花括号字面。
+    #[test]
+    fn io_placeholders_render_only_when_data_in() {
+        let r = row(&[]);
+        let on = render_slot("{{input}}|{{output}}", &r, &HashSet::new(), true, "IN", "OUT");
+        assert_eq!(on, "IN|OUT");
+        let off = render_slot("{{input}}|{{output}}", &r, &HashSet::new(), false, "IN", "OUT");
+        assert_eq!(off, "{{input}}|{{output}}");
+    }
+
+    /// 槽位未启用 / 模板为空时注入为空串——不发送空段。
+    #[test]
+    fn disabled_or_empty_slot_injects_nothing() {
+        let r = row(&[("a", "1")]);
+        let off = run_store::InjectSlot {
+            enabled: false,
+            text: "{{a}}".into(),
+            ..Default::default()
+        };
+        assert_eq!(build_slot("", &off, &r, "", ""), "");
+        let blank = run_store::InjectSlot {
+            enabled: true,
+            text: "   ".into(),
+            ..Default::default()
+        };
+        assert_eq!(build_slot("", &blank, &r, "", ""), "");
+        assert!(slot_cols(&off).is_empty(), "未启用的槽位不提供列集合");
+    }
+
+    /// 提示词本体导入：勾了才发到该槽位，没勾则该槽位只有数据模板。
+    /// 主体提示词与评测提示词走同一套规则，各自独立决定去向。
+    #[test]
+    fn prompt_body_goes_only_to_slots_that_import_it() {
+        let r = row(&[("a", "1")]);
+        let data = run_store::InjectSlot {
+            enabled: true,
+            text: "数据：{{a}}".into(),
+            prompt_in: false,
+            ..Default::default()
+        };
+        // 纯数据槽位：数据带列名标题、每列各括号包裹
+        assert_eq!(build_slot("提示词本体", &data, &r, "", ""), "数据：(===== a =====\n\n1)");
+
+        let empty = run_store::InjectSlot {
+            prompt_in: true,
+            ..Default::default()
+        };
+        assert_eq!(build_slot("提示词本体", &empty, &r, "", ""), "提示词本体");
+    }
+
+    /// 导入了提示词本体的槽位，数据模板只声明注入哪些列，不作为文本发出。
+    /// 数据靠提示词本体里的 {{列}} 渲染进去——同一份数据不会出现两次。
+    #[test]
+    fn data_template_only_declares_columns_when_prompt_body_is_imported() {
+        let r = row(&[("title", "周末记事"), ("body", "今天天气很好")]);
+        let slot = run_store::InjectSlot {
+            enabled: true,
+            text: "{{title}}、{{body}}".into(),
+            prompt_in: true,
+            ..Default::default()
+        };
+        let out = build_slot("把 {{body}} 改写成标题 {{title}} 的短文", &slot, &r, "", "");
+        assert!(
+            out.contains("(===== body =====\n\n今天天气很好)"),
+            "数据带列名标题与括号：{out}"
+        );
+        assert!(out.contains("(===== title =====\n\n周末记事)"), "数据带列名标题与括号：{out}");
+        assert!(!out.contains("周末记事、今天天气很好"), "模板不该再贴一遍：{out}");
+    }
+
+    /// 没导入提示词本体的槽位，数据模板就是消息内容。
+    #[test]
+    fn data_template_is_the_message_without_prompt_body() {
+        let r = row(&[("title", "周末记事")]);
+        let slot = run_store::InjectSlot {
+            enabled: true,
+            text: "{{title}}".into(),
+            prompt_in: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            build_slot("提示词本体", &slot, &r, "", ""),
+            "(===== title =====\n\n周末记事)"
+        );
+    }
+
+    /// 提示词本体在、但本槽位没声明任何列 → 提示词里的变量保持字面，数据不注入。
+    #[test]
+    fn prompt_body_keeps_literals_when_no_column_is_declared() {
+        let r = row(&[("body", "今天天气很好")]);
+        let slot = run_store::InjectSlot {
+            prompt_in: true,
+            ..Default::default()
+        };
+        assert_eq!(build_slot("把 {{body}} 改写成短文", &slot, &r, "", ""), "把 {{body}} 改写成短文");
+    }
+
+    /// {{input}} 如实反映被测模型收到的消息，空的那条不留空标题。
+    #[test]
+    fn judge_input_mirrors_actual_messages() {
+        // 两条消息都在 → 两段都带标题
+        let both = judge_input_text("你是客服", "用户问：怎么退货");
+        assert!(both.starts_with("【被评估模型的提示词】"));
+        assert!(both.contains("【本条输入】"));
+
+        // 只有 system（数据全在 system 里）→ 不留空的「本条输入」
+        let sys_only = judge_input_text("你是客服", "");
+        assert_eq!(sys_only, "【被评估模型的提示词】\n你是客服");
+        assert!(!sys_only.contains("本条输入"));
+
+        // 只有 user → 不留空的「被评估模型的提示词」
+        assert_eq!(judge_input_text("   ", "只有输入"), "只有输入");
+        assert_eq!(judge_input_text("", ""), "");
+    }
+
     #[test]
     fn hard_error_detects_target_and_judge_failures() {
         let mut r = RowResult {
             index: 0,
+            system: String::new(),
             input: "in".into(),
             output: String::new(),
             target_error: None,

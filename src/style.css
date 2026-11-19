@@ -18,6 +18,23 @@
   --pass: 30 142 90; /* #1E8E5A */
   --fail: 196 71 63; /* #C4473F */
   --warn: 176 122 34; /* #B07A22 */
+  /* 分类色板：前 8 个冷色不连续排列，且亮度梯度错开（亮青/亮柠檬/深蓝/深绿），
+     任意前 5 个组合都一眼可分；9–12 只在超过 8 个分类时才启用 */
+  --cat-0: 206 62 52;
+  --cat-1: 40 190 205;
+  --cat-2: 152 108 216;
+  --cat-3: 235 205 65;
+  --cat-4: 46 88 172;
+  --cat-5: 222 96 176;
+  --cat-6: 22 112 74;
+  --cat-7: 232 140 55;
+  --cat-8: 20 130 150;
+  --cat-9: 170 175 75;
+  --cat-10: 110 116 208;
+  --cat-11: 224 122 120;
+  --card-line: 221 227 233; /* 卡片描边 */
+  --shadow-card: 0 1px 2px rgb(16 24 40 / 0.04), 0 1px 3px rgb(16 24 40 / 0.06);
+  --shadow-pop: 0 8px 24px rgb(16 24 40 / 0.1), 0 2px 6px rgb(16 24 40 / 0.06);
 }
 
 .dark {
@@ -35,6 +52,23 @@
   --pass: 76 195 138; /* #4CC38A */
   --fail: 240 113 103; /* #F07167 */
   --warn: 224 178 82; /* #E0B252 */
+  /* 暗色下整体提亮一档，亮度梯度与亮色保持同一模式 */
+  --cat-0: 240 105 95;
+  --cat-1: 96 214 224;
+  --cat-2: 186 140 236;
+  --cat-3: 244 226 120;
+  --cat-4: 96 128 214;
+  --cat-5: 240 136 200;
+  --cat-6: 70 170 118;
+  --cat-7: 244 172 108;
+  --cat-8: 80 170 188;
+  --cat-9: 204 210 120;
+  --cat-10: 150 156 236;
+  --cat-11: 244 158 156;
+  /* 暗底上外阴影几乎不可见，所以：描边提亮一档 + 卡片顶边一条极淡内高光 */
+  --card-line: 44 53 64;
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.4), inset 0 1px 0 rgb(255 255 255 / 0.035);
+  --shadow-pop: 0 12px 32px rgb(0 0 0 / 0.5), 0 2px 8px rgb(0 0 0 / 0.35);
 }
 
 @layer base {
@@ -97,24 +131,35 @@
 }
 
 @layer components {
-  /* ---- 面 ---- */
-  .surface {
-    @apply bg-panel border border-line rounded-md;
+  /* ---- 卡片外壳 ----
+     面板、抽屉、弹窗都套这一层。overflow-hidden 是必须的：
+     表头是 sticky + 浅灰底，不裁的话方角会盖住卡片圆角 */
+  .card {
+    @apply bg-panel border border-cardline rounded-lg shadow-card overflow-hidden;
   }
-  .surface-header {
-    @apply h-12 px-4 flex items-center gap-3 border-b border-line shrink-0;
+
+  /* ---- 空状态图标底座 ---- */
+  .empty-icon {
+    @apply w-11 h-11 rounded-full bg-wash text-weak flex items-center justify-center
+      ring-1 ring-line/70 shrink-0;
+  }
+
+  /* ---- 骨架屏 ---- */
+  .skeleton {
+    @apply rounded bg-line/60 animate-pulse;
   }
 
   /* ---- 按钮 ---- */
   .btn {
-    @apply inline-flex items-center justify-center gap-1.5 h-8 px-3 rounded
+    @apply inline-flex items-center justify-center gap-1.5 h-8 px-3 rounded-md
       border border-line bg-panel text-main text-[13px] font-medium
       hover:bg-wash hover:border-weak/40 active:translate-y-px
       transition-colors select-none
       disabled:opacity-40 disabled:cursor-not-allowed disabled:active:translate-y-0;
   }
   .btn-primary {
-    @apply btn border-transparent bg-btn text-btnfg hover:bg-btn/90 hover:border-transparent;
+    @apply btn border-transparent bg-btn text-btnfg shadow-sm
+      hover:bg-btn/90 hover:border-transparent;
   }
   .btn-ghost {
     @apply btn border-transparent bg-transparent text-sub
@@ -123,11 +168,18 @@
   .btn-danger {
     @apply btn text-fail hover:bg-fail/10 hover:border-fail/40;
   }
+  /* 执行类操作：测试 / 测速 / 续跑 / 重跑 / 导出 —— 蓝色描边，和主操作的黑区分开 */
+  .btn-blue {
+    @apply btn text-accent border-accent/35 hover:bg-accent/10 hover:border-accent/50;
+  }
+  .btn-blue svg {
+    color: rgb(var(--accent));
+  }
   .btn-sm {
     @apply h-7 px-2.5 text-[12.5px];
   }
   .icon-btn {
-    @apply inline-flex items-center justify-center w-7 h-7 rounded
+    @apply inline-flex items-center justify-center w-7 h-7 rounded-md
       text-sub hover:text-main hover:bg-wash transition-colors
       disabled:opacity-40 disabled:cursor-not-allowed;
   }
@@ -152,14 +204,26 @@
     @apply text-[12px] text-weak leading-relaxed;
   }
 
+  /* ---- 标题层级 ----
+     页面标题和分组标题之间必须有量级差。原来是「15px 黑字 vs 12px 灰字」，
+     差得太小，整页读下来就是一堆同重量的字，没有落点 */
+  .page-title {
+    @apply text-[17px] font-semibold tracking-tight;
+  }
+  .group-title {
+    @apply text-[11.5px] font-medium text-weak tracking-wide;
+  }
+
   /* ---- 导航 ---- */
   .nav-item {
     @apply relative w-full flex items-center gap-2.5 h-9 px-3 rounded
       text-[13px] text-sub hover:text-main hover:bg-wash
       transition-colors select-none;
   }
+  /* 当前项给淡蓝底而不是灰底：这是整页唯一常驻的色彩锚点，
+     不给的话侧栏和主区全是灰白，眼睛扫过去没有落点 */
   .nav-item-active {
-    @apply text-main bg-wash font-medium;
+    @apply text-main bg-accent/[0.09] font-medium;
   }
   .nav-item-active::before {
     content: "";
@@ -184,6 +248,30 @@
     @apply inline-flex items-center gap-1 h-6 px-2 rounded border border-line
       bg-wash text-[11.5px] text-sub whitespace-nowrap;
   }
+  /* 变体必须定义在 .chip 之后：同一 layer 内同特异性，后写的赢 */
+  .chip-pass {
+    @apply chip border-pass/30 bg-pass/10 text-pass;
+  }
+  .chip-fail {
+    @apply chip border-fail/30 bg-fail/10 text-fail;
+  }
+  .chip-warn {
+    @apply chip border-warn/30 bg-warn/10 text-warn;
+  }
+  .chip-accent {
+    @apply chip border-accent/30 bg-accent/10 text-accent;
+  }
+  .chip-muted {
+    @apply chip border-line bg-wash text-sub;
+  }
+  /* 长得像标签、其实是按钮（比如「同被测」）：和旁边的 select 归成一类控件，
+     不再是一坨漂在下拉框右边的裸文字 */
+  .chip-btn {
+    @apply chip h-8 px-2.5 cursor-pointer transition-colors
+      hover:border-accent/50 hover:text-accent
+      disabled:opacity-40 disabled:cursor-not-allowed
+      disabled:hover:border-line disabled:hover:text-sub;
+  }
 
   /* ---- 页签（下划线式） ---- */
   .editor-tab {
@@ -198,18 +286,36 @@
   .data-table {
     @apply w-full text-[12.5px] border-collapse;
   }
+  /* 表头不铺底色：铺了就是一块灰色横条，看着像把表格切成上下两段。
+     改成一排小号淡色标签 + 一条底线，表头就"退后"了，内容浮上来。
+     bg-panel 不能省：sticky 表头必须有实底，否则滚动时内容会透过来 */
   .data-table th {
-    @apply sticky top-0 z-10 bg-panel text-left font-medium text-sub
-      border-b border-line px-2.5 py-2 whitespace-nowrap;
+    @apply sticky top-0 z-10 bg-panel text-left font-medium text-weak
+      border-b border-line px-2.5 py-2 whitespace-nowrap
+      text-[11.5px] tracking-wide;
   }
   .data-table td {
-    @apply border-b border-line/70 px-2.5 py-1.5 align-top text-main;
+    @apply border-b border-line/50 px-2.5 py-1.5 align-top text-main;
   }
   .data-table tbody tr {
-    @apply hover:bg-wash/70 transition-colors;
+    @apply hover:bg-accent/[0.04] transition-colors;
+  }
+  /* 星标任务整行淡黄。用 warn 色压到低透明度，明暗主题都能自动适配 */
+  .data-table tbody tr.row-starred {
+    @apply bg-warn/[0.08];
+  }
+  .data-table tbody tr.row-starred:hover {
+    @apply bg-warn/[0.13];
   }
   .data-table tbody tr.row-active {
     @apply bg-accent/10;
+  }
+  /* ---- 行内进度条：把百分比变成能扫的图形 ---- */
+  .bar {
+    @apply h-1 rounded-full bg-line overflow-hidden;
+  }
+  .bar-fill {
+    @apply h-full rounded-full transition-all;
   }
 
   /* ---- 状态 ---- */
@@ -219,6 +325,25 @@
   .dot {
     @apply inline-block w-1.5 h-1.5 rounded-full shrink-0;
   }
+}
+
+/* 运行中进度条的流动高光，让「正在跑」看得见 */
+@keyframes progress-flow {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 16px 0;
+  }
+}
+.progress-live {
+  background-image: linear-gradient(
+    90deg,
+    rgb(255 255 255 / 0.3) 0 8px,
+    transparent 8px 16px
+  );
+  background-size: 16px 100%;
+  animation: progress-flow 0.7s linear infinite;
 }
 
 /* 滚动容器到边界后不把滚动链传给外层 */

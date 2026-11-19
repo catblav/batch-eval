@@ -10,10 +10,15 @@ import {
   replaceDataset,
   renameDataset,
   removeDataset,
+  toggleList,
 } from "../store";
 import { open, ask } from "@tauri-apps/plugin-dialog";
 import Icon from "./Icon.vue";
 import Pager from "./Pager.vue";
+import EmptyState from "./EmptyState.vue";
+import HoverTip from "./HoverTip.vue";
+import SplitAside from "./SplitAside.vue";
+import NameInput from "./NameInput.vue";
 
 const search = ref("");
 const pasteOpen = ref(false);
@@ -22,7 +27,7 @@ const pasteName = ref("");
 const pasteFormat = ref("auto");
 const busy = ref(false);
 const page = ref(1);
-const pageSize = ref(50);
+const pageSize = ref(10);
 const menuId = ref("");
 const nameDraft = ref("");
 const nameInput = ref(null);
@@ -220,14 +225,17 @@ onBeforeUnmount(() => window.removeEventListener("click", closeMenu));
 </script>
 
 <template>
-  <div class="h-full flex bg-page">
-    <aside class="w-[280px] shrink-0 flex flex-col border-r border-line min-h-0">
-      <div class="h-14 px-4 flex items-center gap-2 shrink-0">
-        <h1 class="text-[15px] font-semibold">数据集</h1>
+  <div class="h-full flex card">
+    <SplitAside>
+      <div class="h-14 px-2.5 flex items-center gap-2 shrink-0">
+        <h1 class="page-title">数据集</h1>
         <span class="text-[12px] text-weak tabular-nums">{{ state.datasets.length }}</span>
         <span class="flex-1" />
         <button class="icon-btn" title="导入数据集" :disabled="busy" @click="chooseFile">
           <Icon name="plus" :size="16" />
+        </button>
+        <button class="icon-btn" title="收起列表" @click="toggleList">
+          <Icon name="chevron-left" :size="15" />
         </button>
       </div>
       <div class="px-3 pb-2 shrink-0">
@@ -238,10 +246,13 @@ onBeforeUnmount(() => window.removeEventListener("click", closeMenu));
         </div>
       </div>
       <div class="flex-1 min-h-0 overflow-y-auto px-2 pb-3 space-y-0.5">
-        <div v-if="!state.datasets.length" class="px-3 py-10 text-center">
-          <p class="text-[13px] text-sub">还没有数据集</p>
-          <p class="hint mt-1.5">支持 CSV / Excel / JSON / 纯文本。</p>
-        </div>
+        <EmptyState
+          v-if="!state.datasets.length"
+          size="sm"
+          icon="database"
+          title="还没有数据集"
+          hint="支持 CSV / Excel / JSON / 纯文本。"
+        />
         <p v-else-if="!filtered.length" class="px-3 py-8 text-center hint">没有匹配的数据集</p>
         <button
           v-for="d in filtered"
@@ -256,27 +267,32 @@ onBeforeUnmount(() => window.removeEventListener("click", closeMenu));
           </div>
         </button>
       </div>
-    </aside>
+    </SplitAside>
 
     <section class="flex-1 min-w-0 flex flex-col bg-panel">
       <template v-if="active">
-        <div class="h-14 px-5 flex items-center gap-2.5 border-b border-line shrink-0">
-          <input
+        <div class="h-14 px-2.5 flex items-center gap-2.5 border-b border-line/60 shrink-0">
+          <button v-if="state.listCollapsed" class="icon-btn shrink-0" title="展开列表"
+            @click="toggleList">
+            <Icon name="chevron-right" :size="15" />
+          </button>
+          <NameInput
             ref="nameInput"
             v-model="nameDraft"
-            class="min-w-0 w-[240px] h-8 px-1.5 rounded border border-transparent bg-transparent
-              text-[15px] font-semibold text-main hover:border-line focus:border-accent transition-colors"
             placeholder="数据集名称"
-            @blur="commitName"
-            @keydown.enter.prevent="$event.target.blur()"
-            @keydown.esc="nameDraft = active.name; $event.target.blur()"
+            @commit="commitName"
+            @cancel="nameDraft = active.name"
           />
           <span class="text-[11.5px] text-weak shrink-0">
             {{ usedBy.length ? `被 ${usedBy.length} 个方案使用` : "暂无方案使用" }}
           </span>
           <span class="flex-1" />
-          <button class="btn btn-sm" @click="pasteOpen = !pasteOpen">粘贴数据</button>
+          <button class="btn btn-sm" @click="pasteOpen = !pasteOpen">
+            <Icon name="clipboard" :size="13" />
+            粘贴数据
+          </button>
           <button class="btn-primary btn-sm" :disabled="busy" @click="chooseFile">
+            <Icon name="upload" :size="13" />
             {{ busy ? "处理中…" : "导入文件" }}
           </button>
           <div class="relative">
@@ -298,7 +314,7 @@ onBeforeUnmount(() => window.removeEventListener("click", closeMenu));
           </div>
         </div>
 
-        <div v-if="pasteOpen" class="shrink-0 px-5 py-3 border-b border-line bg-page space-y-2">
+        <div v-if="pasteOpen" class="shrink-0 px-2.5 py-3 border-b border-line/60 bg-wash/40 space-y-2">
           <div class="flex items-center gap-2">
             <input v-model="pasteName" class="field w-52" placeholder="名称（留空为「粘贴数据」）" />
             <select v-model="pasteFormat" class="field w-36">
@@ -310,6 +326,7 @@ onBeforeUnmount(() => window.removeEventListener("click", closeMenu));
             <span class="flex-1" />
             <button class="btn-ghost btn-sm" @click="pasteOpen = false">取消</button>
             <button class="btn-primary btn-sm" :disabled="busy" @click="submitPaste">
+              <Icon name="check" :size="12" />
               {{ busy ? "解析中…" : "导入" }}
             </button>
           </div>
@@ -321,23 +338,23 @@ onBeforeUnmount(() => window.removeEventListener("click", closeMenu));
           />
         </div>
 
-        <div class="shrink-0 px-5 py-3 border-b border-line">
+        <div class="shrink-0 px-2.5 py-3 border-b border-line/60">
           <div class="flex items-center gap-3 text-[12px] text-sub flex-wrap">
             <span class="tabular-nums">{{ total.toLocaleString() }} 行 · {{ columns.length }} 列</span>
             <span v-if="active.source" class="text-weak truncate max-w-[320px]">来源 {{ active.source }}</span>
             <span v-if="preview.skipped" class="text-warn">跳过 {{ preview.skipped }} 行坏数据</span>
-            <span v-if="statusCol" class="chip text-pass border-pass/30">有分组列</span>
+            <span v-if="statusCol" class="chip-pass">有分组列</span>
             <span class="flex-1" />
           </div>
           <div class="mt-2 flex flex-wrap gap-1.5 max-h-[52px] overflow-y-auto">
-            <span v-for="c in columns" :key="c" class="chip font-mono">
+            <span v-for="c in columns" :key="c" class="chip">
               {{ c }}
               <span v-if="c === '数据组状态'" class="text-warn">分组</span>
             </span>
           </div>
         </div>
 
-        <div v-if="large" class="shrink-0 px-5 py-2 border-b border-line text-[12px] text-warn bg-warn/5">
+        <div v-if="large" class="shrink-0 px-2.5 py-2 border-b border-line/60 text-[12px] text-warn bg-warn/5">
           数据量较大（{{ total.toLocaleString() }} 行）。建议并发 4–8、超时不低于 180 秒，先用少量数据试跑。
         </div>
 
@@ -345,19 +362,23 @@ onBeforeUnmount(() => window.removeEventListener("click", closeMenu));
           <table class="data-table">
             <thead>
               <tr>
-                <th class="w-12 text-right pr-3">#</th>
+                <th class="w-12">#</th>
                 <th v-for="c in columns" :key="c">{{ c }}</th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="(r, i) in rows" :key="offset + i">
-                <td class="text-right pr-3 text-weak tabular-nums">{{ offset + i + 1 }}</td>
-                <td v-for="c in columns" :key="c" class="font-mono text-[12px]">
-                  <span :title="String(r[c] ?? '')">{{ sample(r[c]) }}</span>
+                <td class="text-weak tabular-nums">{{ offset + i + 1 }}</td>
+                <td v-for="c in columns" :key="c" class="text-[12px]">
+                  <HoverTip :text="String(r[c] ?? '')">
+                    <span>{{ sample(r[c]) }}</span>
+                  </HoverTip>
                 </td>
               </tr>
               <tr v-if="!rows.length && preview.loading">
-                <td :colspan="columns.length + 1" class="text-center text-weak py-10">读取中…</td>
+                <td :colspan="columns.length + 1" class="py-3">
+                  <span v-for="n in 3" :key="n" class="skeleton block h-3 mb-2 last:mb-0" />
+                </td>
               </tr>
             </tbody>
           </table>
@@ -367,19 +388,29 @@ onBeforeUnmount(() => window.removeEventListener("click", closeMenu));
           :total="total"
           :page="page"
           :page-size="pageSize"
+          :sizes="[5, 10, 20]"
           @update:page="loadPage"
           @update:page-size="onPageSize"
         />
       </template>
 
-      <div v-else class="flex-1 flex flex-col items-center justify-center gap-2">
-        <p class="text-[13px] text-sub">还没有选择数据集</p>
-        <p class="hint">导入一份 CSV、Excel 或 JSON，方案会引用它来逐行评测。</p>
-        <div class="flex items-center gap-2 mt-2">
-          <button class="btn" @click="pasteOpen = !pasteOpen">粘贴数据</button>
-          <button class="btn-primary" :disabled="busy" @click="chooseFile">导入文件</button>
+      <EmptyState
+        v-else
+        icon="database"
+        title="还没有选择数据集"
+        hint="导入一份 CSV、Excel 或 JSON，方案会引用它来逐行评测。"
+      >
+        <div class="flex items-center gap-2">
+          <button class="btn" @click="pasteOpen = !pasteOpen">
+            <Icon name="clipboard" :size="14" />
+            粘贴数据
+          </button>
+          <button class="btn-primary" :disabled="busy" @click="chooseFile">
+            <Icon name="upload" :size="14" />
+            导入文件
+          </button>
         </div>
-      </div>
+      </EmptyState>
     </section>
   </div>
 </template>
