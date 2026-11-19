@@ -1,6 +1,6 @@
 [package]
 name = "batch-eval"
-version = "0.1.4"
+version = "0.1.5"
 description = "黑猫-自动评测台"
 authors = ["you"]
 edition = "2021"
